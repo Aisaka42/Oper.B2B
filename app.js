@@ -174,6 +174,7 @@ async function blobToBase64(blob) {
 
 function normalizeRepoArchiveDoc(record) {
   const mime = record.mime || "application/octet-stream";
+  const contentBase64 = typeof record.contentBase64 === "string" ? record.contentBase64 : "";
   return {
     id: record.id || record.name,
     name: record.name || record.id || "document",
@@ -185,7 +186,8 @@ function normalizeRepoArchiveDoc(record) {
     size: Number(record.size) || 0,
     mime,
     savedAt: record.savedAt || new Date().toISOString(),
-    blob: base64ToBlob(record.contentBase64 || "", mime)
+    filePath: record.filePath || "",
+    blob: contentBase64 ? base64ToBlob(contentBase64, mime) : null
   };
 }
 
@@ -203,7 +205,8 @@ function normalizeRepoSnapshotRecord(record) {
     status: record.status || (verified ? "verified" : warnings.length ? "needs-review" : "uploaded"),
     sourceText: typeof record.sourceText === "string" ? record.sourceText : "",
     sourceMime: record.sourceMime || "text/markdown",
-    sourceFileName: record.sourceFileName || `${record.projectCode || "project"}_${record.snapshotMonth || "snapshot"}.md`
+    sourceFileName: record.sourceFileName || `${record.projectCode || "project"}_${record.snapshotMonth || "snapshot"}.md`,
+    sourceFilePath: record.sourceFilePath || ""
   };
 }
 
@@ -2166,7 +2169,8 @@ async function buildRepoArchivePayload() {
       size: item.size,
       mime: item.mime,
       savedAt: item.savedAt,
-      contentBase64: await blobToBase64(item.blob)
+      filePath: item.filePath || "",
+      contentBase64: item.blob ? await blobToBase64(item.blob) : ""
     });
   }
 
@@ -2189,7 +2193,8 @@ async function buildRepoArchivePayload() {
     sourceFileName: item.sourceFileName,
     sourceMime: item.sourceMime,
     sourceSize: item.sourceSize,
-    sourceText: item.sourceText || ""
+    sourceText: item.sourceText || "",
+    sourceFilePath: item.sourceFilePath || ""
   }));
 
   return {
@@ -2377,6 +2382,16 @@ async function downloadSnapshotDocument(id) {
   const item = state.snapshotRecords.find((record) => record.id === id);
   if (!item) return;
 
+  if (item.sourceFilePath) {
+    const link = document.createElement("a");
+    link.href = item.sourceFilePath;
+    link.download = item.sourceFileName || `${item.projectCode}_${item.snapshotMonth}.md`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    return;
+  }
+
   if (!item.sourceText) {
     state.snapshotMessages[item.projectCode] = "Для этого demo-среза исходный markdown не вложен. Загрузите реальный устав, и скачивание появится.";
     state.archiveMessage = state.snapshotMessages[item.projectCode];
@@ -2399,6 +2414,16 @@ async function downloadSnapshotDocument(id) {
 async function downloadArchiveDocument(id) {
   const item = state.archiveDocs.find((doc) => doc.id === id);
   if (!item) return;
+  if (item.filePath && !item.blob) {
+    const link = document.createElement("a");
+    link.href = item.filePath;
+    link.download = item.name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    return;
+  }
+  if (!item.blob) return;
   const url = URL.createObjectURL(item.blob);
   const link = document.createElement("a");
   link.href = url;
