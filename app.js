@@ -13,6 +13,7 @@ const state = {
   archiveDocs: [],
   archiveLoading: true,
   archiveMessage: "",
+  dashboardModel: dashboard,
   snapshotRecords: [],
   snapshotLoading: true,
   snapshotMessages: {},
@@ -450,7 +451,7 @@ function snapshotProjectRecords(projectCode) {
 }
 
 function snapshotProjectExists(projectCode) {
-  return dashboard.projects.some((project) => project.code === projectCode);
+  return currentDashboard().projects.some((project) => project.code === projectCode);
 }
 
 function lookupMetricMeta(name) {
@@ -687,6 +688,751 @@ function parseFileName(name) {
   };
 }
 
+function currentDashboard() {
+  return state.dashboardModel || dashboard;
+}
+
+function cloneDashboardSeed() {
+  return JSON.parse(JSON.stringify(dashboard));
+}
+
+function escapeRegex(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cleanInlineMarkdown(value = "") {
+  return String(value)
+    .replace(/\[(.*?)\]\((.*?)\)/gu, "$1")
+    .replace(/\*\*|__/gu, "")
+    .replace(/`/gu, "")
+    .replace(/<br\s*\/?>/giu, " ")
+    .replace(/\u00a0/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function normalizeWeeklyText(text = "") {
+  return String(text).replace(/\r\n/gu, "\n");
+}
+
+function parseStatusCode(value = "") {
+  const normalized = normalizeMetricName(value);
+  if (normalized.startsWith("зел")) return "green";
+  if (normalized.startsWith("жел") || normalized.startsWith("жол")) return "yellow";
+  if (normalized.startsWith("крас")) return "red";
+  return "";
+}
+
+function statusLabel(status) {
+  switch (status) {
+    case "green":
+      return "Зелёный";
+    case "yellow":
+      return "Жёлтый";
+    case "red":
+      return "Красный";
+    default:
+      return "Требует оценки";
+  }
+}
+
+function parseBooleanFlag(value = "") {
+  const normalized = normalizeMetricName(value);
+  if (!normalized) return false;
+  return normalized === "да" || normalized === "есть" || normalized.includes("требуется") || normalized.startsWith("нужна");
+}
+
+function parsePercentValue(value = "") {
+  const match = String(value).match(/(\d+(?:[.,]\d+)?)\s*%/u);
+  return match ? Number(match[1].replace(",", ".")) : null;
+}
+
+function parseRuDate(value = "") {
+  const match = String(value).match(/(\d{2})\.(\d{2})\.(\d{4})/u);
+  if (!match) return "";
+  return `${match[3]}-${match[2]}-${match[1]}`;
+}
+
+function weekTimestamp(value = "") {
+  const iso = parseRuDate(value);
+  return iso ? new Date(`${iso}T00:00:00`).getTime() : 0;
+}
+
+function uniqueCompact(items = []) {
+  return [...new Set(items.map((item) => cleanInlineMarkdown(item)).filter(Boolean))];
+}
+
+function buildProjectId(projectCode = "", fallback = "") {
+  const source = projectCode || fallback || "project";
+  return source.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/gu, "");
+}
+
+function splitProjectIdentity(value = "", fallbackCode = "", fallbackName = "") {
+  const cleaned = cleanInlineMarkdown(value);
+  const match = cleaned.match(/\b([A-ZА-ЯЁ]-\d{2}-\d+)\b\s*(.*)$/u);
+  return {
+    code: match?.[1] || fallbackCode || "",
+    name: cleanInlineMarkdown(match?.[2] || fallbackName || cleaned.replace(/\b[A-ZА-ЯЁ]-\d{2}-\d+\b/u, ""))
+  };
+}
+
+function extractBoldMeta(text, label) {
+  const match = text.match(new RegExp(`\\*\\*${escapeRegex(label)}:\\*\\*\\s*([^\\n]+)`, "iu"));
+  return cleanInlineMarkdown(match?.[1] || "");
+}
+
+function extractNumberedSection(text, sectionNumber) {
+  const startMatch = text.match(new RegExp(`^##\\s*${sectionNumber}\\.\\s+[^\\n]+\\n`, "mu"));
+  if (!startMatch) return "";
+  const start = (startMatch.index || 0) + startMatch[0].length;
+  const rest = text.slice(start);
+  const nextMatch = rest.match(/^##\s*\d+\.\s+[^\n]+\n/mu);
+  const end = nextMatch ? start + (nextMatch.index || 0) : text.length;
+  return text.slice(start, end).trim();
+}
+
+function parseBulletSection(sectionText = "") {
+  const result = {};
+  for (const rawLine of sectionText.split("\n")) {
+    const line = rawLine.trim();
+    const match = line.match(/^-+\s+\*\*([^*]+?)\*\*\s*(.+)$/u);
+    if (!match) continue;
+    const key = cleanInlineMarkdown(match[1]).replace(/:\s*$/u, "").trim();
+    result[key] = cleanInlineMarkdown(match[2]);
+  }
+  return result;
+}
+
+function parseMarkdownGrid(blockText = "") {
+  const tableLines = blockText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("|"));
+
+  if (tableLines.length < 2) return null;
+
+  const rows = tableLines.map((line) =>
+    line
+      .replace(/^\|/u, "")
+      .replace(/\|$/u, "")
+      .split("|")
+      .map((cell) => cleanInlineMarkdown(cell))
+  );
+
+  const divider = rows[1]?.every((cell) => /^:?-{3,}:?$/u.test(cell.replace(/\s+/gu, "")));
+  if (!divider) return null;
+
+  return {
+    headers: rows[0],
+    rows: rows.slice(2)
+  };
+}
+
+function tableRowsAsObjects(blockText = "") {
+  const table = parseMarkdownGrid(blockText);
+  if (!table) return [];
+
+  const headers = table.headers.map((header) => normalizeMetricName(header));
+  return table.rows
+    .map((cells) => {
+      const record = {};
+      headers.forEach((header, index) => {
+        record[header] = cleanInlineMarkdown(cells[index] || "");
+      });
+      return record;
+    })
+    .filter((row) => Object.values(row).some(Boolean));
+}
+
+function rowValue(row, aliases = []) {
+  const pairs = Object.entries(row || {});
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeMetricName(alias);
+    const match = pairs.find(([key]) => key === normalizedAlias || key.startsWith(normalizedAlias));
+    if (match && match[1]) {
+      return cleanInlineMarkdown(match[1]);
+    }
+  }
+  return "";
+}
+
+function sectionPlainText(sectionText = "") {
+  return cleanInlineMarkdown(
+    sectionText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("|") && !line.startsWith("##") && line !== "---")
+      .join(" ")
+  );
+}
+
+function isEmptySectionStatement(text = "") {
+  return /не выявлены|не зафиксированы|не выделены|не требуется|не отмечены|не сформированы/iu.test(text);
+}
+
+function joinSentenceParts(parts = []) {
+  return parts.map((part) => cleanInlineMarkdown(part)).filter(Boolean).join(" — ");
+}
+
+function parseProtocolDocument(doc, rawText) {
+  const text = normalizeWeeklyText(rawText);
+  const identity = splitProjectIdentity(extractBoldMeta(text, "Проект"), doc.projectCode, doc.projectName);
+  const overview = parseBulletSection(extractNumberedSection(text, 1));
+  const deviationSection = extractNumberedSection(text, 4);
+  const riskSection = extractNumberedSection(text, 5);
+  const escalationSection = extractNumberedSection(text, 8);
+  const nextWeekSection = extractNumberedSection(text, 7);
+
+  const deviationRows = tableRowsAsObjects(deviationSection);
+  const riskRows = tableRowsAsObjects(riskSection);
+  const escalationRows = tableRowsAsObjects(escalationSection);
+  const nextWeekRows = tableRowsAsObjects(nextWeekSection);
+
+  const deviations = deviationRows.length
+    ? deviationRows.map((row) => joinSentenceParts([
+      rowValue(row, ["обязательство", "что не выполнено"]),
+      rowValue(row, ["причина невыполнения", "причина"]),
+      rowValue(row, ["влияние на этап / срок / kpi", "влияние"]),
+      rowValue(row, ["корректирующее действие"])
+    ]))
+    : (isEmptySectionStatement(sectionPlainText(deviationSection)) ? [] : uniqueCompact([sectionPlainText(deviationSection)]));
+
+  const nextWeekPlan = nextWeekRows.map((row) => ({
+    task: rowValue(row, ["обязательство следующей недели", "обязательство"]),
+    owner: rowValue(row, ["ответственный"]),
+    result: rowValue(row, ["критерий готовности", "критерий завершения / приемки", "критерий"]),
+    due: rowValue(row, ["срок", "плановая дата"])
+  })).filter((item) => item.task);
+
+  const escalation = riskRows.some((row) => parseBooleanFlag(rowValue(row, ["требуется эскалация"])))
+    || (escalationRows.length > 0)
+    || (!isEmptySectionStatement(sectionPlainText(escalationSection)) && Boolean(sectionPlainText(escalationSection)));
+
+  const primaryRisk = riskRows.length
+    ? joinSentenceParts([
+      rowValue(riskRows[0], ["риск / блокер", "риск", "блокер"]),
+      rowValue(riskRows[0], ["влияние"])
+    ])
+    : "";
+
+  return {
+    type: "project_protocol",
+    projectCode: identity.code,
+    projectName: identity.name || doc.projectName,
+    periodText: extractBoldMeta(text, "Период"),
+    reportDate: extractBoldMeta(text, "Дата статуса"),
+    customer: extractBoldMeta(text, "Заказчик"),
+    manager: extractBoldMeta(text, "Руководитель проекта"),
+    status: parseStatusCode(overview["Статус проекта"]),
+    weekSummary: overview["Ключевой вывод недели"] || "",
+    expectedResult: overview["Ближайший ожидаемый результат"] || "",
+    expectedDate: overview["Плановая дата результата"] || "",
+    probability: overview["Оценка вероятности достижения в срок"] || "",
+    deviations,
+    risk: primaryRisk,
+    escalation,
+    nextWeekPlan
+  };
+}
+
+function parseChecklistDocument(doc, rawText) {
+  const text = normalizeWeeklyText(rawText);
+  const identity = splitProjectIdentity(extractBoldMeta(text, "Проект"), doc.projectCode, doc.projectName);
+  const evaluation = parseBulletSection(extractNumberedSection(text, 1));
+  const checklistRows = tableRowsAsObjects(extractNumberedSection(text, 2));
+  const summarySection = extractNumberedSection(text, 3);
+  const explicitGreen = summarySection.match(/Количество пунктов[^0-9]*✅[^0-9]*(\d+)/u);
+  const explicitWarn = summarySection.match(/Количество пунктов[^0-9]*⚠️[^0-9]*(\d+)/u);
+
+  const countedGreen = checklistRows.filter((row) => rowValue(row, ["статус"]).includes("✅")).length;
+  const countedWarn = checklistRows.filter((row) => rowValue(row, ["статус"]).includes("⚠️")).length;
+  const greenChecks = explicitGreen ? Number(explicitGreen[1]) : countedGreen || null;
+  const warningChecks = explicitWarn ? Number(explicitWarn[1]) : countedWarn || null;
+  const totalChecks = (greenChecks || warningChecks)
+    ? (greenChecks || 0) + (warningChecks || 0)
+    : (checklistRows.length || null);
+  const quality = totalChecks ? Math.round(((greenChecks || 0) / totalChecks) * 100) : null;
+
+  return {
+    type: "checklist",
+    projectCode: identity.code,
+    projectName: identity.name || doc.projectName,
+    periodText: extractBoldMeta(text, "Период оценки"),
+    reportDate: extractBoldMeta(text, "Дата оценки"),
+    status: parseStatusCode(evaluation["Статус проекта"]),
+    progress: parsePercentValue(evaluation["Прогресс к ближайшему ожидаемому результату"]),
+    probability: evaluation["Вероятность достижения результата в срок"] || "",
+    risk: evaluation["Ключевой риск недели"] || "",
+    managementProblem: parseBooleanFlag(evaluation["Признаки управленческой проблемы"]),
+    nextCriticalStep: evaluation["Что критично сделать на следующей неделе"] || "",
+    escalation: parseBooleanFlag(evaluation["Нужна ли эскалация"]),
+    rationale: evaluation["Краткое обоснование оценки"] || sectionPlainText(summarySection),
+    greenChecks,
+    warningChecks: warningChecks || 0,
+    totalChecks,
+    quality
+  };
+}
+
+function parseRatingDocument(doc, rawText) {
+  const text = normalizeWeeklyText(rawText);
+  const identity = splitProjectIdentity(extractBoldMeta(text, "Проект"), doc.projectCode, doc.projectName);
+  const sectionOne = parseBulletSection(extractNumberedSection(text, 1));
+  const scoreMatch = text.match(/\*\*(?:Балл недели|Итоговый балл|Weekly-балл проекта):\*\*\s*([0-9]+(?:[.,][0-9]+)?)/u);
+  const progressMatch = text.match(/\*\*(?:Прогресс|Прогресс проекта):\*\*\s*([0-9]+(?:[.,][0-9]+)?)%/u);
+
+  return {
+    type: "rating",
+    projectCode: identity.code,
+    projectName: identity.name || doc.projectName,
+    periodText: extractBoldMeta(text, "Период оценки") || extractBoldMeta(text, "Период"),
+    reportDate: extractBoldMeta(text, "Дата оценки") || extractBoldMeta(text, "Дата статуса"),
+    status: parseStatusCode(sectionOne["Статус проекта"] || ""),
+    score: scoreMatch ? Number(scoreMatch[1].replace(",", ".")) : null,
+    progress: progressMatch ? Number(progressMatch[1].replace(",", ".")) : null,
+    risk: sectionOne["Ключевой риск недели"] || "",
+    escalation: parseBooleanFlag(sectionOne["Нужна ли эскалация"] || "")
+  };
+}
+
+function resolveArchiveFileUrl(filePath, cacheKey = "") {
+  const url = new URL(filePath, window.location.href);
+  if (cacheKey) {
+    url.searchParams.set("_archive", cacheKey);
+  }
+  return url.toString();
+}
+
+async function readArchiveDocumentText(doc) {
+  if (doc.__textCache) {
+    return doc.__textCache;
+  }
+
+  if (doc.ext !== "md" && !String(doc.name || "").endsWith(".md")) {
+    return "";
+  }
+
+  if (doc.blob) {
+    const text = await doc.blob.text();
+    doc.__textCache = text;
+    return text;
+  }
+
+  if (!doc.filePath) {
+    return "";
+  }
+
+  const response = await fetch(resolveArchiveFileUrl(doc.filePath, doc.savedAt || doc.id || Date.now()), { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Не удалось прочитать ${doc.name}: ${response.status}`);
+  }
+  const text = await response.text();
+  doc.__textCache = text;
+  return text;
+}
+
+function scoreFromStatus(status, fallbackQuality = null) {
+  if (status === "green") return 5;
+  if (status === "yellow") return 2;
+  if (status === "red") return 1;
+  if (fallbackQuality != null) {
+    if (fallbackQuality >= 85) return 5;
+    if (fallbackQuality >= 70) return 2;
+    return 1;
+  }
+  return 0;
+}
+
+function buildWeekEntry(doc, parsed) {
+  const periodKey = doc.periodDate || parsed.reportDate || "";
+  if (!parsed.projectCode || !periodKey) {
+    return null;
+  }
+
+  return {
+    key: `${parsed.projectCode}__${periodKey}`,
+    weekKey: periodKey,
+    weekTs: weekTimestamp(periodKey) || weekTimestamp(parsed.reportDate),
+    projectCode: parsed.projectCode,
+    projectName: parsed.projectName || doc.projectName,
+    type: parsed.type,
+    savedAt: doc.savedAt || "",
+    periodText: parsed.periodText || "",
+    reportDate: parsed.reportDate || "",
+    payload: parsed
+  };
+}
+
+function deriveWeekProjectState(entry) {
+  const protocol = entry.project_protocol || null;
+  const checklist = entry.checklist || null;
+  const rating = entry.rating || null;
+  const status = rating?.status || checklist?.status || protocol?.status || "";
+  const protocolStatus = protocol?.status || status;
+  const quality = checklist?.quality ?? null;
+  const greenChecks = checklist?.greenChecks ?? null;
+  const totalChecks = checklist?.totalChecks ?? null;
+  const latestPlan = protocol?.nextWeekPlan?.[0] || null;
+  const deviations = uniqueCompact([
+    ...(protocol?.deviations || []),
+    (protocolStatus && status && protocolStatus !== status)
+      ? `Протокол и weekly-оценка расходятся: ${statusLabel(protocolStatus)} vs ${statusLabel(status)}.`
+      : ""
+  ]);
+
+  return {
+    id: buildProjectId(entry.projectCode, entry.projectName),
+    code: entry.projectCode,
+    name: entry.projectName || protocol?.projectName || checklist?.projectName || rating?.projectName || entry.projectCode,
+    manager: protocol?.manager || entry.manager || "Требует уточнения",
+    customer: protocol?.customer || entry.customer || "Требует уточнения",
+    status: status || entry.seedStatus || "yellow",
+    statusLabel: statusLabel(status || entry.seedStatus || "yellow"),
+    protocolStatus: protocolStatus || status || entry.seedStatus || "yellow",
+    score: rating?.score ?? scoreFromStatus(status, quality),
+    progress: rating?.progress ?? checklist?.progress ?? null,
+    quality,
+    greenChecks,
+    totalChecks,
+    reportSubmitted: true,
+    escalation: Boolean(rating?.escalation || checklist?.escalation || protocol?.escalation),
+    risk: checklist?.risk || rating?.risk || protocol?.risk || "Требует уточнения",
+    nextCriticalStep: checklist?.nextCriticalStep || latestPlan?.task || protocol?.expectedResult || "Требует уточнения",
+    weekSummary: protocol?.weekSummary || checklist?.rationale || "Weekly сохранён, но краткий итог недели не найден.",
+    deviations,
+    nextWeekPlan: protocol?.nextWeekPlan?.length ? protocol.nextWeekPlan : []
+  };
+}
+
+function buildHistoryFromProjects(projectWeeksMap, weekKeys) {
+  return weekKeys.map((weekKey) => {
+    const values = [...projectWeeksMap.values()]
+      .map((weeks) => weeks.get(weekKey))
+      .filter(Boolean);
+
+    const green = values.filter((item) => item.status === "green").length;
+    const yellow = values.filter((item) => item.status === "yellow").length;
+    const red = values.filter((item) => item.status === "red").length;
+    const qualities = values.map((item) => item.quality).filter((value) => Number.isFinite(value));
+    const avgQuality = qualities.length
+      ? Math.round(qualities.reduce((sum, value) => sum + value, 0) / qualities.length)
+      : 0;
+
+    return {
+      date: weekKey,
+      green,
+      yellow,
+      red,
+      avgQuality
+    };
+  });
+}
+
+function buildAlertsFromProjects(projects, latestWeekKey) {
+  const scored = projects.map((project) => {
+    if (!project.reportSubmitted) {
+      return {
+        priority: 300,
+        level: "critical",
+        project: `${project.code} ${project.name}`,
+        text: `За ${latestWeekKey} weekly не загружен. На карточке показан последний доступный контекст.`
+      };
+    }
+
+    if (project.status === "red") {
+      return {
+        priority: 250,
+        level: "critical",
+        project: `${project.code} ${project.name}`,
+        text: `${project.risk}. Следующий шаг: ${project.nextCriticalStep}.`
+      };
+    }
+
+    if (project.escalation) {
+      return {
+        priority: 220,
+        level: project.progress != null && project.progress < 50 ? "critical" : "warning",
+        project: `${project.code} ${project.name}`,
+        text: `Есть эскалация. Прогресс ${project.progress ?? "—"}%. ${project.risk}`
+      };
+    }
+
+    if (project.status === "yellow" || (project.quality != null && project.quality < 85)) {
+      return {
+        priority: 180 - (project.progress ?? 0),
+        level: "warning",
+        project: `${project.code} ${project.name}`,
+        text: `Прогресс ${project.progress ?? "—"}%. ${project.risk}`
+      };
+    }
+
+    return null;
+  }).filter(Boolean);
+
+  return scored
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 6)
+    .map(({ priority, ...alert }) => alert);
+}
+
+function buildManagersFromProjects(projects, projectWeeksMap, weekKeys) {
+  const groups = new Map();
+
+  for (const project of projects) {
+    const managerName = project.manager || "Требует уточнения";
+    if (!groups.has(managerName)) {
+      groups.set(managerName, {
+        name: managerName,
+        projects: 0,
+        reportCount: 0,
+        totalScore: 0,
+        averageScore: 0,
+        averageQuality: 0,
+        escalations: 0,
+        green: 0,
+        weekProjects: []
+      });
+    }
+
+    const bucket = groups.get(managerName);
+    bucket.projects += 1;
+
+    const projectWeeks = projectWeeksMap.get(project.code) || new Map();
+    const firstSeenIndex = weekKeys.findIndex((week) => projectWeeks.has(week));
+    const startIndex = firstSeenIndex === -1 ? 0 : firstSeenIndex;
+    const qualityValues = [];
+
+    for (let index = startIndex; index < weekKeys.length; index += 1) {
+      const weekKey = weekKeys[index];
+      const record = projectWeeks.get(weekKey);
+      bucket.reportCount += 1;
+      if (record) {
+        bucket.totalScore += record.score ?? 0;
+        bucket.escalations += record.escalation ? 1 : 0;
+        bucket.green += record.status === "green" ? 1 : 0;
+        if (Number.isFinite(record.quality)) {
+          qualityValues.push(record.quality);
+        }
+      }
+    }
+
+    const latestRecord = projectWeeks.get(weekKeys[weekKeys.length - 1]);
+    bucket.weekProjects.push({
+      name: project.code,
+      score: latestRecord?.score ?? 0
+    });
+
+    bucket.__qualityValues = (bucket.__qualityValues || []).concat(qualityValues);
+  }
+
+  return [...groups.values()].map((manager) => ({
+    ...manager,
+    averageScore: manager.reportCount ? Number((manager.totalScore / manager.reportCount).toFixed(2)) : 0,
+    averageQuality: manager.__qualityValues?.length
+      ? Math.round(manager.__qualityValues.reduce((sum, value) => sum + value, 0) / manager.__qualityValues.length)
+      : 0
+  })).map((manager) => {
+    delete manager.__qualityValues;
+    return manager;
+  });
+}
+
+async function rebuildDashboardModel() {
+  const base = cloneDashboardSeed();
+  const weeklyDocs = state.archiveDocs.filter((item) =>
+    item.type === "project_protocol" || item.type === "checklist" || item.type === "rating"
+  );
+
+  if (!weeklyDocs.length) {
+    state.dashboardModel = base;
+    return;
+  }
+
+  const parsedWeeks = new Map();
+  const parseErrors = [];
+
+  for (const doc of weeklyDocs) {
+    try {
+      const text = await readArchiveDocumentText(doc);
+      if (!text) continue;
+
+      let parsed = null;
+      if (doc.type === "project_protocol") {
+        parsed = parseProtocolDocument(doc, text);
+      } else if (doc.type === "checklist") {
+        parsed = parseChecklistDocument(doc, text);
+      } else if (doc.type === "rating") {
+        parsed = parseRatingDocument(doc, text);
+      }
+
+      if (!parsed) continue;
+
+      const weekEntry = buildWeekEntry(doc, parsed);
+      if (!weekEntry) continue;
+
+      if (!parsedWeeks.has(weekEntry.key)) {
+        parsedWeeks.set(weekEntry.key, {
+          weekKey: weekEntry.weekKey,
+          weekTs: weekEntry.weekTs,
+          projectCode: weekEntry.projectCode,
+          projectName: weekEntry.projectName,
+          periodText: weekEntry.periodText,
+          reportDate: weekEntry.reportDate
+        });
+      }
+
+      const bucket = parsedWeeks.get(weekEntry.key);
+      const currentSavedAt = bucket[`${weekEntry.type}SavedAt`] || "";
+      if (!currentSavedAt || new Date(weekEntry.savedAt || 0) >= new Date(currentSavedAt || 0)) {
+        bucket[weekEntry.type] = weekEntry.payload;
+        bucket[`${weekEntry.type}SavedAt`] = weekEntry.savedAt || "";
+      }
+
+      bucket.projectName = bucket.projectName || weekEntry.projectName;
+      bucket.periodText = bucket.periodText || weekEntry.periodText;
+      bucket.reportDate = bucket.reportDate || weekEntry.reportDate;
+    } catch (error) {
+      parseErrors.push(`${doc.name}: ${error.message}`);
+    }
+  }
+
+  if (!parsedWeeks.size) {
+    state.dashboardModel = base;
+    if (parseErrors.length) {
+      state.archiveMessage = `Weekly-файлы найдены, но не разобраны: ${parseErrors[0]}`;
+    }
+    return;
+  }
+
+  const seedProjects = new Map(base.projects.map((project) => [project.code, project]));
+  const weekKeys = [...new Set([...parsedWeeks.values()].map((item) => item.weekKey))]
+    .sort((a, b) => weekTimestamp(a) - weekTimestamp(b));
+  const latestWeekKey = weekKeys[weekKeys.length - 1] || base.summary.newestReportDate || "";
+  const projectWeeksMap = new Map();
+
+  for (const weekEntry of parsedWeeks.values()) {
+    const seed = seedProjects.get(weekEntry.projectCode);
+    const derived = deriveWeekProjectState({
+      ...weekEntry,
+      manager: seed?.manager || "",
+      customer: seed?.customer || "",
+      seedStatus: seed?.status || ""
+    });
+
+    if (!projectWeeksMap.has(derived.code)) {
+      projectWeeksMap.set(derived.code, new Map());
+    }
+    projectWeeksMap.get(derived.code).set(weekEntry.weekKey, {
+      ...derived,
+      weekKey: weekEntry.weekKey,
+      weekTs: weekEntry.weekTs,
+      periodText: weekEntry.periodText,
+      reportDate: weekEntry.reportDate
+    });
+  }
+
+  const extraCodes = [...projectWeeksMap.keys()].filter((code) => !seedProjects.has(code)).sort((a, b) => a.localeCompare(b, "ru"));
+  const projectCodes = [...base.projects.map((project) => project.code), ...extraCodes];
+  const projects = projectCodes.map((code) => {
+    const seed = seedProjects.get(code);
+    const weeks = projectWeeksMap.get(code) || new Map();
+    const sortedWeeks = [...weeks.values()].sort((a, b) => b.weekTs - a.weekTs);
+    const latestRecord = latestWeekKey ? weeks.get(latestWeekKey) : null;
+    const displayRecord = latestRecord || sortedWeeks[0] || null;
+    const missingMessage = !latestRecord && latestWeekKey
+      ? `За ${latestWeekKey} weekly не загружен. Показан последний доступный контекст${displayRecord ? ` за ${displayRecord.weekKey}` : ""}.`
+      : "";
+
+    if (!displayRecord && seed) {
+      return {
+        ...seed,
+        score: latestWeekKey ? 0 : seed.score,
+        reportSubmitted: !latestWeekKey ? seed.reportSubmitted : false,
+        deviations: uniqueCompact([missingMessage, ...(seed.deviations || [])]),
+        weekSummary: missingMessage || seed.weekSummary || "Weekly за текущую неделю ещё не загружен."
+      };
+    }
+
+    const status = latestRecord?.status || displayRecord?.status || seed?.status || "yellow";
+    const statusLabelValue = latestRecord?.statusLabel || displayRecord?.statusLabel || seed?.statusLabel || statusLabel(status);
+    const protocolStatus = latestRecord?.protocolStatus || displayRecord?.protocolStatus || seed?.protocolStatus || status;
+    const quality = latestRecord?.quality ?? displayRecord?.quality ?? seed?.quality ?? null;
+    const greenChecks = latestRecord?.greenChecks ?? displayRecord?.greenChecks ?? seed?.greenChecks ?? null;
+    const totalChecks = latestRecord?.totalChecks ?? displayRecord?.totalChecks ?? null;
+    const nextWeekPlan = latestRecord?.nextWeekPlan?.length
+      ? latestRecord.nextWeekPlan
+      : (displayRecord?.nextWeekPlan?.length ? displayRecord.nextWeekPlan : (seed?.nextWeekPlan || []));
+
+    return {
+      id: displayRecord?.id || seed?.id || buildProjectId(code, displayRecord?.name || seed?.name || code),
+      code,
+      name: displayRecord?.name || seed?.name || code,
+      manager: displayRecord?.manager || seed?.manager || "Требует уточнения",
+      customer: displayRecord?.customer || seed?.customer || "Требует уточнения",
+      status,
+      statusLabel: statusLabelValue,
+      protocolStatus,
+      score: latestRecord ? (latestRecord.score ?? 0) : 0,
+      progress: latestRecord?.progress ?? displayRecord?.progress ?? seed?.progress ?? null,
+      quality,
+      greenChecks,
+      totalChecks,
+      reportSubmitted: Boolean(latestRecord),
+      escalation: latestRecord ? Boolean(latestRecord.escalation) : false,
+      risk: latestRecord?.risk || displayRecord?.risk || seed?.risk || "Требует уточнения",
+      nextCriticalStep: latestRecord?.nextCriticalStep || displayRecord?.nextCriticalStep || seed?.nextCriticalStep || "Требует уточнения",
+      weekSummary: latestRecord?.weekSummary || displayRecord?.weekSummary || seed?.weekSummary || missingMessage || "Weekly за текущую неделю ещё не загружен.",
+      deviations: uniqueCompact([missingMessage, ...(latestRecord?.deviations || displayRecord?.deviations || seed?.deviations || [])]),
+      nextWeekPlan
+    };
+  });
+
+  const latestSubmitted = projects.filter((project) => project.reportSubmitted);
+  const missingProjects = projects.filter((project) => !project.reportSubmitted);
+  const qualityValues = latestSubmitted.map((project) => project.quality).filter((value) => Number.isFinite(value));
+  const totalGreenChecks = latestSubmitted.reduce((sum, project) => sum + (project.greenChecks || 0), 0);
+  const totalPossibleChecks = latestSubmitted.reduce((sum, project) => sum + (project.totalChecks || 0), 0);
+  const managers = buildManagersFromProjects(projects, projectWeeksMap, weekKeys);
+  const latestPeriodTexts = uniqueCompact(
+    latestSubmitted
+      .map((project) => projectWeeksMap.get(project.code)?.get(latestWeekKey)?.periodText || "")
+  );
+
+  state.dashboardModel = {
+    ...base,
+    generatedAt: new Date().toISOString(),
+    latestPeriod: latestPeriodTexts.length === 1
+      ? `${latestPeriodTexts[0]} · загрузка ${latestWeekKey}`
+      : (latestWeekKey || base.latestPeriod),
+    summary: {
+      projects: projects.length,
+      reportsForNewWeek: latestSubmitted.length,
+      missingReports: missingProjects.length,
+      missingProjectNames: missingProjects.map((project) => `${project.code} ${project.name}`),
+      newestReportDate: latestWeekKey || base.summary.newestReportDate,
+      managers: managers.length,
+      totalScore: projects.reduce((sum, project) => sum + (project.score || 0), 0),
+      green: latestSubmitted.filter((project) => project.status === "green").length,
+      yellow: latestSubmitted.filter((project) => project.status === "yellow").length,
+      red: latestSubmitted.filter((project) => project.status === "red").length,
+      escalations: latestSubmitted.filter((project) => project.escalation).length,
+      averageQuality: qualityValues.length
+        ? Math.round(qualityValues.reduce((sum, value) => sum + value, 0) / qualityValues.length)
+        : 0,
+      totalGreenChecks,
+      totalPossibleChecks
+    },
+    history: buildHistoryFromProjects(projectWeeksMap, weekKeys),
+    alerts: buildAlertsFromProjects(projects, latestWeekKey),
+    projects,
+    managers
+  };
+
+  if (parseErrors.length) {
+    state.archiveMessage = `${state.archiveMessage ? `${state.archiveMessage} ` : ""}Часть weekly не разобралась: ${parseErrors[0]}`.trim();
+  }
+}
+
 function documentTypeLabel(type) {
   switch (type) {
     case "rating":
@@ -701,17 +1447,19 @@ function documentTypeLabel(type) {
 }
 
 function missingList() {
-  if (!dashboard.summary.projects) {
+  const model = currentDashboard();
+  if (!model.summary.projects) {
     return "<li>Проекты ещё не добавлены</li>";
   }
 
-  return dashboard.summary.missingProjectNames.length
-    ? dashboard.summary.missingProjectNames.map((name) => `<li>${escapeHtml(name)}</li>`).join("")
+  return model.summary.missingProjectNames.length
+    ? model.summary.missingProjectNames.map((name) => `<li>${escapeHtml(name)}</li>`).join("")
     : "<li>Все проекты сдали отчёты</li>";
 }
 
 function historyMarkup() {
-  if (!dashboard.history.length) {
+  const model = currentDashboard();
+  if (!model.history.length) {
     return `
       <article class="snapshotEmpty subtle">
         <strong>История пока пустая.</strong>
@@ -720,7 +1468,7 @@ function historyMarkup() {
     `;
   }
 
-  return dashboard.history.map((week) => {
+  return model.history.map((week) => {
     const total = week.green + week.yellow + week.red || 1;
     return `
       <article class="historyWeek">
@@ -746,7 +1494,8 @@ function historyMarkup() {
 }
 
 function nextWeekFocusMarkup() {
-  const focusCards = dashboard.projects
+  const model = currentDashboard();
+  const focusCards = model.projects
     .filter((project) => project.nextWeekPlan?.length)
     .slice(0, 4)
     .map((project) => {
@@ -1346,7 +2095,8 @@ function projectSnapshotsMarkup(project) {
 }
 
 function projectCardsMarkup() {
-  if (!dashboard.projects.length) {
+  const model = currentDashboard();
+  if (!model.projects.length) {
     return `
       <article class="card projectCard">
         <div class="projectTop">
@@ -1366,7 +2116,7 @@ function projectCardsMarkup() {
     `;
   }
 
-  return dashboard.projects.map((project) => {
+  return model.projects.map((project) => {
     const plan = project.nextWeekPlan.map((item) => `
       <li class="nextPlanItem">
         <div class="nextPlanRow">
@@ -1459,7 +2209,8 @@ function managerSort(a, b) {
 }
 
 function managersMarkup() {
-  const sorted = [...dashboard.managers].sort(managerSort);
+  const model = currentDashboard();
+  const sorted = [...model.managers].sort(managerSort);
   if (!sorted.length) {
     return `
       <section class="sectionStack">
@@ -1604,7 +2355,8 @@ function methodologyMarkup() {
             <li>Расчёт зелёного, жёлтого и красного статуса.</li>
             <li>Вес weekly-фактов, рисков, отклонений и эскалаций.</li>
             <li>Расчёт weekly-балла проекта.</li>
-            <li>Интерфейс только отображает результат и сохраняет объяснимость.</li>
+            <li>Интерфейс сразу пересчитывает сводку, карточки проектов и рейтинг РП после загрузки weekly в архив.</li>
+            <li>Если отдельный <strong>rating</strong> не загружен, сайт временно берёт weekly-балл из статуса и чек-листа, чтобы панель всё равно обновлялась.</li>
           </ul>
         </article>
 
@@ -1703,7 +2455,7 @@ function archiveMarkup() {
     : `
       <article class="archiveEmpty">
         <strong>Архив пока пуст.</strong>
-        <span>Загрузите протоколы, weekly-rating и чек-листы. Они сохранятся локально в браузере этого ноутбука и будут доступны для скачивания позже.</span>
+        <span>Загрузите протоколы и rating. Если есть чек-листы, сайт тоже примет их и учтёт в расчётах. Файлы сохранятся локально в браузере этого ноутбука и будут доступны для скачивания позже.</span>
       </article>
     `;
 
@@ -1738,7 +2490,7 @@ function archiveMarkup() {
         <article class="card metricCard tone-accent">
           <div class="metricLabel">Weekly-файлы</div>
           <div class="metricValue">${state.archiveDocs.length}</div>
-          <div class="metricSub">Протоколы, rating и чек-листы недели.</div>
+          <div class="metricSub">Файлы недельного контура: протоколы, rating и при необходимости чек-листы.</div>
         </article>
         <article class="card metricCard tone-green">
           <div class="metricLabel">Уставы</div>
@@ -1768,7 +2520,7 @@ function archiveMarkup() {
         <div class="panelHeader">
           <div>
             <h2>Weekly-документы</h2>
-            <p>Протоколы, rating и чек-листы загружаются раз в неделю и хранятся здесь же.</p>
+            <p>Протоколы и rating загружаются раз в неделю и хранятся здесь же. После сохранения сайт сразу обновляет сводку, проекты и рейтинг РП.</p>
           </div>
         </div>
         <div class="archiveToolbar">
@@ -1800,8 +2552,9 @@ function archiveMarkup() {
 }
 
 function overviewMarkup() {
-  const alertsMarkup = dashboard.alerts.length
-    ? dashboard.alerts.map((alert) => `
+  const model = currentDashboard();
+  const alertsMarkup = model.alerts.length
+    ? model.alerts.map((alert) => `
         <article class="alertItem ${alert.level}">
           <div class="focusTop">
             <strong>${escapeHtml(alert.project)}</strong>
@@ -1822,27 +2575,27 @@ function overviewMarkup() {
       <section class="metricsGrid">
         <article class="card metricCard tone-accent">
           <div class="metricLabel">Отчётов за новую неделю</div>
-          <div class="metricValue">${dashboard.summary.reportsForNewWeek}</div>
-          <div class="metricSub">Из ${dashboard.summary.projects} проектов получили свежий weekly.</div>
+          <div class="metricValue">${model.summary.reportsForNewWeek}</div>
+          <div class="metricSub">Из ${model.summary.projects} проектов получили свежий weekly.</div>
         </article>
         <article class="card metricCard tone-red">
           <div class="metricLabel">Не сдали отчёты</div>
-          <div class="metricValue">${dashboard.summary.missingReports}</div>
+          <div class="metricValue">${model.summary.missingReports}</div>
           <div class="metricSub"><ul class="methodList">${missingList()}</ul></div>
         </article>
         <article class="card metricCard tone-green">
           <div class="metricLabel">Качество weekly</div>
-          <div class="metricValue">${dashboard.summary.averageQuality}%</div>
-          <div class="metricSub">${dashboard.summary.totalGreenChecks} зелёных пунктов из ${dashboard.summary.totalPossibleChecks} по сданным отчётам недели.</div>
+          <div class="metricValue">${model.summary.averageQuality}%</div>
+          <div class="metricSub">${model.summary.totalGreenChecks} зелёных пунктов из ${model.summary.totalPossibleChecks} по сданным отчётам недели.</div>
         </article>
         <article class="card metricCard tone-yellow">
           <div class="metricLabel">Светофор недели</div>
-          <div class="metricValue">${dashboard.summary.green}/${dashboard.summary.yellow}/${dashboard.summary.red}</div>
-          <div class="metricSub">Зелёных: ${dashboard.summary.green}, жёлтых: ${dashboard.summary.yellow}, красных: ${dashboard.summary.red}.</div>
+          <div class="metricValue">${model.summary.green}/${model.summary.yellow}/${model.summary.red}</div>
+          <div class="metricSub">Зелёных: ${model.summary.green}, жёлтых: ${model.summary.yellow}, красных: ${model.summary.red}.</div>
         </article>
-        <article class="card metricCard ${dashboard.summary.escalations ? "tone-red" : "tone-accent"}">
+        <article class="card metricCard ${model.summary.escalations ? "tone-red" : "tone-accent"}">
           <div class="metricLabel">Эскалации</div>
-          <div class="metricValue">${dashboard.summary.escalations}</div>
+          <div class="metricValue">${model.summary.escalations}</div>
           <div class="metricSub">Выведены отдельно, чтобы weekly не выглядел зелёным до последнего.</div>
         </article>
       </section>
@@ -1901,6 +2654,7 @@ function activeTabMarkup() {
 }
 
 function render() {
+  const model = currentDashboard();
   app.innerHTML = `
     <main class="appShell">
       <section class="hero">
@@ -1912,9 +2666,9 @@ function render() {
             план на следующую неделю, эскалации и качество weekly-отчёта без необходимости открывать каждый документ отдельно.
           </p>
           <div class="heroMeta">
-            <span class="metaBadge">Период weekly: <code>${escapeHtml(dashboard.latestPeriod)}</code></span>
-            <span class="metaBadge">Обновлено: <code>${escapeHtml(formatDate(dashboard.generatedAt))}</code></span>
-            <span class="metaBadge">Проектов: <code>${dashboard.summary.projects}</code></span>
+            <span class="metaBadge">Период weekly: <code>${escapeHtml(model.latestPeriod)}</code></span>
+            <span class="metaBadge">Обновлено: <code>${escapeHtml(formatDate(model.generatedAt))}</code></span>
+            <span class="metaBadge">Проектов: <code>${model.summary.projects}</code></span>
           </div>
         </article>
 
@@ -1926,15 +2680,15 @@ function render() {
           <div class="trafficMini">
             <article class="trafficMiniCard">
               <div class="trafficMiniLabel">Зелёный</div>
-              <div class="trafficMiniValue" style="color:var(--green)">${dashboard.summary.green}</div>
+              <div class="trafficMiniValue" style="color:var(--green)">${model.summary.green}</div>
             </article>
             <article class="trafficMiniCard">
               <div class="trafficMiniLabel">Жёлтый</div>
-              <div class="trafficMiniValue" style="color:var(--yellow)">${dashboard.summary.yellow}</div>
+              <div class="trafficMiniValue" style="color:var(--yellow)">${model.summary.yellow}</div>
             </article>
             <article class="trafficMiniCard">
               <div class="trafficMiniLabel">Нет отчёта</div>
-              <div class="trafficMiniValue" style="color:var(--red)">${dashboard.summary.missingReports}</div>
+              <div class="trafficMiniValue" style="color:var(--red)">${model.summary.missingReports}</div>
             </article>
           </div>
         </aside>
@@ -2117,6 +2871,7 @@ async function refreshArchiveState() {
   try {
     const rollbackDone = await rollbackSeededArchiveDocs();
     state.archiveDocs = await archiveGetAll();
+    await rebuildDashboardModel();
     if (rollbackDone) {
       state.archiveMessage = "Автозагрузка из папок отменена. Импортированные документы убраны из локального архива.";
     }
@@ -2139,6 +2894,7 @@ async function initializeArchiveLayer() {
     const repoSync = await syncRepoArchiveSeed();
     state.archiveDocs = await archiveGetAll();
     state.snapshotRecords = await snapshotGetAll();
+    await rebuildDashboardModel();
 
     if (rollbackDone) {
       state.archiveMessage = "Автозагрузка из папок отменена. Импортированные документы убраны из локального архива.";
@@ -2375,6 +3131,7 @@ async function saveArchiveFiles(files) {
 
   state.archiveMessage = `Сохранено файлов: ${files.length}. Теперь их можно скачать из локального архива в любое время.`;
   state.archiveDocs = await archiveGetAll();
+  await rebuildDashboardModel();
   render();
 }
 
@@ -2437,6 +3194,7 @@ async function downloadArchiveDocument(id) {
 async function deleteArchiveDocument(id) {
   await archiveDelete(id);
   state.archiveDocs = await archiveGetAll();
+  await rebuildDashboardModel();
   state.archiveMessage = "Документ удалён из локального архива.";
   render();
 }
