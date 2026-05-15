@@ -457,6 +457,7 @@ function normalizeRepoArchiveDoc(record) {
   return {
     id: record.id || record.name,
     name: record.name || record.id || "document",
+    sourceName: record.sourceName || "",
     type: record.type || "project_protocol",
     projectCode: record.projectCode || "",
     projectName: record.projectName || "",
@@ -980,14 +981,267 @@ function parseCharterSnapshot(text, expectedProjectCode, snapshotMonth) {
 }
 
 function parseFileName(name) {
-  const match = name.match(/^(rating|project_protocol|checklist)_(\d{2}\.\d{2}\.\d{4})_([A-Za-zА-Яа-я0-9-]+)_(.+)\.(md|xlsx)$/u);
-  if (!match) return null;
+  const source = String(name || "").trim();
+  const extMatch = source.match(/\.([^.]+)$/u);
+  if (!extMatch) return null;
+
+  const ext = extMatch[1].toLowerCase();
+  if (ext !== "md" && ext !== "xlsx") return null;
+
+  const base = source.slice(0, -extMatch[0].length);
+  const lowered = base.toLowerCase();
+  const typePrefix = ["project_protocol", "rating", "raiting", "checklist"].find((prefix) => lowered.startsWith(`${prefix}_`));
+  if (!typePrefix) return null;
+
+  const rest = base.slice(typePrefix.length + 1);
+  const date = extractRuDateToken(rest);
+  if (!date || !rest.startsWith(date)) return null;
+
+  const tail = rest.slice(date.length).replace(/^[_\s-]+/u, "");
+  const codeMatch = tail.match(/^([A-Za-zА-Яа-яЁё])[-_\s]?(\d{2})[-_\s]?(\d+)(?:[_\s-]+)(.+)$/u);
+  if (!codeMatch) return null;
+
   return {
-    type: match[1],
-    date: match[2],
-    projectCode: match[3],
-    projectName: match[4],
-    ext: match[5]
+    type: normalizeWeeklyFileType(typePrefix),
+    date,
+    projectCode: `${codeMatch[1].toUpperCase()}-${codeMatch[2]}-${codeMatch[3]}`,
+    projectName: sanitizeWeeklyProjectName(codeMatch[4]),
+    ext
+  };
+}
+
+function normalizeWeeklyFileType(value = "") {
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "raiting") return "rating";
+  if (normalized.includes("project_protocol") || normalized.includes("protocol")) return "project_protocol";
+  if (normalized.includes("rating") || normalized.includes("raiting")) return "rating";
+  if (normalized.includes("checklist")) return "checklist";
+  return normalized;
+}
+
+function extractRuDateToken(value = "") {
+  const match = String(value).match(/(\d{2}\.\d{2}\.\d{4})/u);
+  return match ? match[1] : "";
+}
+
+function normalizeProjectCode(value = "") {
+  const cleaned = cleanInlineMarkdown(value)
+    .toUpperCase()
+    .replace(/[–—−]/gu, "-");
+  const match = cleaned.match(/\b([A-ZА-ЯЁ])[-_\s]?(\d{2})[-_\s]?(\d+)\b/u);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+}
+
+function sanitizeWeeklyProjectName(value = "") {
+  return cleanInlineMarkdown(value)
+    .replace(/[\\/:*?"<>|]/gu, " ")
+    .replace(/\s*[\[(]\d+[\])]\s*$/u, "")
+    .replace(/\s+(?:final|исправлено|копия|версия(?:\s*\d+)?)$/iu, "")
+    .replace(/\s+/gu, " ")
+    .replace(/\.+$/u, "")
+    .trim();
+}
+
+function lookupProjectNameByCode(projectCode = "") {
+  const normalizedCode = normalizeProjectCode(projectCode);
+  if (!normalizedCode) return "";
+  const sourceProjects = currentDashboard?.()?.projects || dashboard.projects || [];
+  const match = sourceProjects.find((project) => normalizeProjectCode(project.code) === normalizedCode);
+  return match?.name || "";
+}
+
+function typeHintFromFileName(name = "") {
+  const lowered = String(name).toLowerCase();
+  if (lowered.includes("project_protocol") || lowered.includes("project protocol") || lowered.includes("протокол")) {
+    return "project_protocol";
+  }
+  if (lowered.includes("rating") || lowered.includes("raiting") || lowered.includes("рейтинг")) {
+    return "rating";
+  }
+  if (lowered.includes("checklist") || lowered.includes("чек")) {
+    return "checklist";
+  }
+  return "";
+}
+
+function buildWeeklyFileName(meta = {}) {
+  const type = normalizeWeeklyFileType(meta.type || "");
+  const date = extractRuDateToken(meta.date || meta.periodDate || meta.reportDate || "");
+  const projectCode = normalizeProjectCode(meta.projectCode || "");
+  const projectName = sanitizeWeeklyProjectName(meta.projectName || lookupProjectNameByCode(projectCode));
+  const ext = String(meta.ext || "md").toLowerCase();
+  if (!type || !date || !projectCode || !projectName || (ext !== "md" && ext !== "xlsx")) {
+    return "";
+  }
+  return `${type}_${date}_${projectCode}_${projectName}.${ext}`;
+}
+
+function buildResolvedWeeklyMeta(type, parsed, fallback = {}, ext = "md") {
+  const resolvedType = normalizeWeeklyFileType(type || parsed?.type || fallback.type || "");
+  const projectCode = normalizeProjectCode(parsed?.projectCode || fallback.projectCode || "");
+  const projectName = sanitizeWeeklyProjectName(
+    parsed?.projectName
+      || fallback.projectName
+      || lookupProjectNameByCode(projectCode)
+  );
+  const date = extractRuDateToken(parsed?.reportDate || parsed?.date || fallback.date || fallback.periodDate || "");
+  const normalizedExt = String(ext || fallback.ext || "md").toLowerCase();
+
+  if (!resolvedType || !projectCode || !projectName || !date || (normalizedExt !== "md" && normalizedExt !== "xlsx")) {
+    return null;
+  }
+
+  return {
+    type: resolvedType,
+    date,
+    projectCode,
+    projectName,
+    ext: normalizedExt
+  };
+}
+
+function weeklyMetaConfidence(type, parsed = {}) {
+  let score = 0;
+  if (parsed.projectCode) score += 4;
+  if (parsed.reportDate) score += 4;
+  if (parsed.projectName) score += 2;
+
+  if (type === "project_protocol") {
+    if (parsed.manager) score += 2;
+    if (parsed.customer) score += 2;
+    if (parsed.weekSummary) score += 2;
+    if (parsed.nextWeekPlan?.length) score += 2;
+    if (parsed.expectedResult) score += 1;
+  }
+
+  if (type === "rating") {
+    if (parsed.score != null) score += 3;
+    if (parsed.progress != null) score += 2;
+    if (parsed.status) score += 1;
+    if (parsed.risk) score += 1;
+  }
+
+  if (type === "checklist") {
+    if (parsed.totalChecks != null) score += 3;
+    if (parsed.quality != null) score += 2;
+    if (parsed.status) score += 1;
+    if (parsed.rationale) score += 1;
+  }
+
+  return score;
+}
+
+function inferWeeklyMetaFromText(file, text, fallback = {}) {
+  const parserMap = {
+    project_protocol: parseProtocolDocument,
+    rating: parseRatingDocument,
+    checklist: parseChecklistDocument
+  };
+
+  const docStub = {
+    projectCode: fallback.projectCode || "",
+    projectName: fallback.projectName || lookupProjectNameByCode(fallback.projectCode || "")
+  };
+
+  const orderedTypes = [
+    fallback.type,
+    typeHintFromFileName(file.name),
+    "project_protocol",
+    "rating",
+    "checklist"
+  ].filter((value, index, items) => value && items.indexOf(value) === index);
+
+  const candidates = [];
+
+  for (const type of orderedTypes) {
+    const parser = parserMap[type];
+    if (!parser) continue;
+    const parsed = parser(docStub, text);
+    const meta = buildResolvedWeeklyMeta(type, parsed, fallback, fallback.ext || "md");
+    if (!meta) continue;
+
+    const score = weeklyMetaConfidence(type, parsed);
+    if (score < 8) continue;
+    candidates.push({ meta, score });
+  }
+
+  candidates.sort((left, right) => right.score - left.score);
+  return candidates[0]?.meta || null;
+}
+
+async function inspectWeeklyFile(file) {
+  const originalName = file.name;
+  const ext = String(originalName.split(".").pop() || "").toLowerCase();
+
+  if (ext !== "md" && ext !== "xlsx") {
+    return {
+      name: originalName,
+      valid: false,
+      message: "Поддерживаются только weekly-файлы .md и .xlsx."
+    };
+  }
+
+  const parsedName = parseFileName(originalName);
+  if (parsedName) {
+    const resolvedName = buildWeeklyFileName(parsedName);
+    return {
+      name: originalName,
+      valid: true,
+      parsed: parsedName,
+      resolvedName,
+      sourceName: originalName,
+      autoRenamed: resolvedName !== originalName,
+      message: resolvedName === originalName
+        ? "Имя файла корректно и может быть принято системой."
+        : `Имя будет автоматически приведено к ${resolvedName}.`
+    };
+  }
+
+  const fallback = {
+    type: typeHintFromFileName(originalName),
+    date: extractRuDateToken(originalName),
+    projectCode: normalizeProjectCode(originalName),
+    projectName: "",
+    ext
+  };
+
+  if (ext === "md") {
+    const text = await file.text();
+    const inferredMeta = inferWeeklyMetaFromText(file, text, fallback);
+    if (inferredMeta) {
+      const resolvedName = buildWeeklyFileName(inferredMeta);
+      return {
+        name: originalName,
+        valid: true,
+        parsed: inferredMeta,
+        resolvedName,
+        sourceName: originalName,
+        autoRenamed: true,
+        message: `Имя не по шаблону, но сайт автоматически сохранит файл как ${resolvedName}.`
+      };
+    }
+  }
+
+  const fallbackMeta = buildResolvedWeeklyMeta(fallback.type, fallback, fallback, ext);
+  if (fallbackMeta) {
+    const resolvedName = buildWeeklyFileName(fallbackMeta);
+    return {
+      name: originalName,
+      valid: true,
+      parsed: fallbackMeta,
+      resolvedName,
+      sourceName: originalName,
+      autoRenamed: true,
+      message: `Имя будет автоматически приведено к ${resolvedName}.`
+    };
+  }
+
+  return {
+    name: originalName,
+    valid: false,
+    message: ext === "xlsx"
+      ? "Для этого файла не удалось автоматически определить тип, дату или проект. Для .xlsx используйте шаблон имени вручную."
+      : "Не удалось автоматически определить тип, дату или проект из имени и содержимого файла."
   };
 }
 
@@ -1373,10 +1627,45 @@ function buildWeekEntry(doc, parsed) {
   };
 }
 
+function describeWeeklyBundle(entry) {
+  const hasProtocol = Boolean(entry.project_protocol);
+  const hasChecklist = Boolean(entry.checklist);
+  const hasRating = Boolean(entry.rating);
+  const documentCount = Number(hasProtocol) + Number(hasChecklist) + Number(hasRating);
+  const weeklyComplete = hasProtocol && (hasRating || hasChecklist);
+
+  let packageLabel = "Нет weekly";
+  if (hasProtocol && hasRating && hasChecklist) {
+    packageLabel = "Protocol + rating + checklist";
+  } else if (hasProtocol && hasRating) {
+    packageLabel = "Protocol + rating";
+  } else if (hasProtocol && hasChecklist) {
+    packageLabel = "Protocol + checklist";
+  } else if (hasProtocol) {
+    packageLabel = "Только protocol";
+  } else if (hasRating && hasChecklist) {
+    packageLabel = "Rating + checklist";
+  } else if (hasRating) {
+    packageLabel = "Только rating";
+  } else if (hasChecklist) {
+    packageLabel = "Только checklist";
+  }
+
+  return {
+    hasProtocol,
+    hasChecklist,
+    hasRating,
+    documentCount,
+    weeklyComplete,
+    packageLabel
+  };
+}
+
 function deriveWeekProjectState(entry) {
   const protocol = entry.project_protocol || null;
   const checklist = entry.checklist || null;
   const rating = entry.rating || null;
+  const weeklyBundle = describeWeeklyBundle(entry);
   const status = rating?.status || checklist?.status || protocol?.status || "";
   const protocolStatus = protocol?.status || status;
   const quality = checklist?.quality ?? null;
@@ -1405,6 +1694,12 @@ function deriveWeekProjectState(entry) {
     greenChecks,
     totalChecks,
     reportSubmitted: true,
+    weeklyComplete: weeklyBundle.weeklyComplete,
+    weeklyDocumentCount: weeklyBundle.documentCount,
+    weeklyPackageLabel: weeklyBundle.packageLabel,
+    hasProtocol: weeklyBundle.hasProtocol,
+    hasChecklist: weeklyBundle.hasChecklist,
+    hasRating: weeklyBundle.hasRating,
     escalation: Boolean(rating?.escalation || checklist?.escalation || protocol?.escalation),
     risk: checklist?.risk || rating?.risk || protocol?.risk || "Требует уточнения",
     nextCriticalStep: checklist?.nextCriticalStep || latestPlan?.task || protocol?.expectedResult || "Требует уточнения",
@@ -1414,22 +1709,31 @@ function deriveWeekProjectState(entry) {
   };
 }
 
-function buildHistoryFromProjects(projectWeeksMap, weekKeys) {
+function buildHistoryFromProjects(projectWeeksMap, weekKeys, totalProjects) {
   return weekKeys.map((weekKey) => {
     const values = [...projectWeeksMap.values()]
       .map((weeks) => weeks.get(weekKey))
       .filter(Boolean);
 
+    const submitted = values.length;
+    const complete = values.filter((item) => item.weeklyComplete).length;
+    const partial = submitted - complete;
+    const pending = Math.max(totalProjects - submitted, 0);
     const green = values.filter((item) => item.status === "green").length;
     const yellow = values.filter((item) => item.status === "yellow").length;
     const red = values.filter((item) => item.status === "red").length;
     const qualities = values.map((item) => item.quality).filter((value) => Number.isFinite(value));
     const avgQuality = qualities.length
       ? Math.round(qualities.reduce((sum, value) => sum + value, 0) / qualities.length)
-      : 0;
+      : null;
 
     return {
       date: weekKey,
+      projects: totalProjects,
+      submitted,
+      complete,
+      partial,
+      pending,
       green,
       yellow,
       red,
@@ -1446,6 +1750,15 @@ function buildAlertsFromProjects(projects, latestWeekKey) {
         level: "critical",
         project: `${project.code} ${project.name}`,
         text: `За ${latestWeekKey} weekly не загружен. На карточке показан последний доступный контекст.`
+      };
+    }
+
+    if (!project.weeklyComplete) {
+      return {
+        priority: 235,
+        level: "warning",
+        project: `${project.code} ${project.name}`,
+        text: `За ${latestWeekKey} weekly собран частично: ${project.weeklyPackageLabel}. Остальные данные можно догрузить позже.`
       };
     }
 
@@ -1658,6 +1971,12 @@ async function rebuildDashboardModel() {
         ...seed,
         score: latestWeekKey ? 0 : seed.score,
         reportSubmitted: !latestWeekKey ? seed.reportSubmitted : false,
+        weeklyComplete: false,
+        weeklyDocumentCount: 0,
+        weeklyPackageLabel: "Нет weekly",
+        hasProtocol: false,
+        hasChecklist: false,
+        hasRating: false,
         deviations: uniqueCompact([missingMessage, ...(seed.deviations || [])]),
         weekSummary: missingMessage || seed.weekSummary || "Weekly за текущую неделю ещё не загружен."
       };
@@ -1688,6 +2007,12 @@ async function rebuildDashboardModel() {
       greenChecks,
       totalChecks,
       reportSubmitted: Boolean(latestRecord),
+      weeklyComplete: latestRecord ? Boolean(latestRecord.weeklyComplete) : false,
+      weeklyDocumentCount: latestRecord?.weeklyDocumentCount ?? 0,
+      weeklyPackageLabel: latestRecord?.weeklyPackageLabel || (latestWeekKey ? "Нет weekly" : ""),
+      hasProtocol: Boolean(latestRecord?.hasProtocol),
+      hasChecklist: Boolean(latestRecord?.hasChecklist),
+      hasRating: Boolean(latestRecord?.hasRating),
       escalation: latestRecord ? Boolean(latestRecord.escalation) : false,
       risk: latestRecord?.risk || displayRecord?.risk || seed?.risk || "Требует уточнения",
       nextCriticalStep: latestRecord?.nextCriticalStep || displayRecord?.nextCriticalStep || seed?.nextCriticalStep || "Требует уточнения",
@@ -1698,6 +2023,8 @@ async function rebuildDashboardModel() {
   });
 
   const latestSubmitted = projects.filter((project) => project.reportSubmitted);
+  const latestComplete = latestSubmitted.filter((project) => project.weeklyComplete);
+  const latestPartial = latestSubmitted.filter((project) => !project.weeklyComplete);
   const missingProjects = projects.filter((project) => !project.reportSubmitted);
   const qualityValues = latestSubmitted.map((project) => project.quality).filter((value) => Number.isFinite(value));
   const totalGreenChecks = latestSubmitted.reduce((sum, project) => sum + (project.greenChecks || 0), 0);
@@ -1712,13 +2039,17 @@ async function rebuildDashboardModel() {
     ...base,
     generatedAt: new Date().toISOString(),
     latestPeriod: latestPeriodTexts.length === 1
-      ? `${latestPeriodTexts[0]} · загрузка ${latestWeekKey}`
+      ? `${latestPeriodTexts[0]} · загрузка ${latestWeekKey} · сдали ${latestSubmitted.length}/${projects.length}`
       : (latestWeekKey || base.latestPeriod),
     summary: {
       projects: projects.length,
       reportsForNewWeek: latestSubmitted.length,
+      completeReports: latestComplete.length,
+      partialReports: latestPartial.length,
       missingReports: missingProjects.length,
       missingProjectNames: missingProjects.map((project) => `${project.code} ${project.name}`),
+      partialProjectNames: latestPartial.map((project) => `${project.code} ${project.name}`),
+      incompleteReports: projects.length - latestComplete.length,
       newestReportDate: latestWeekKey || base.summary.newestReportDate,
       managers: managers.length,
       totalScore: projects.reduce((sum, project) => sum + (project.score || 0), 0),
@@ -1728,11 +2059,11 @@ async function rebuildDashboardModel() {
       escalations: latestSubmitted.filter((project) => project.escalation).length,
       averageQuality: qualityValues.length
         ? Math.round(qualityValues.reduce((sum, value) => sum + value, 0) / qualityValues.length)
-        : 0,
+        : null,
       totalGreenChecks,
       totalPossibleChecks
     },
-    history: buildHistoryFromProjects(projectWeeksMap, weekKeys),
+    history: buildHistoryFromProjects(projectWeeksMap, weekKeys, projects.length),
     alerts: buildAlertsFromProjects(projects, latestWeekKey),
     projects,
     managers
@@ -1762,9 +2093,26 @@ function missingList() {
     return "<li>Проекты ещё не добавлены</li>";
   }
 
-  return model.summary.missingProjectNames.length
-    ? model.summary.missingProjectNames.map((name) => `<li>${escapeHtml(name)}</li>`).join("")
+  const missingNames = Array.isArray(model.summary.missingProjectNames) ? model.summary.missingProjectNames : [];
+  return missingNames.length
+    ? missingNames.map((name) => `<li>${escapeHtml(name)}</li>`).join("")
     : "<li>Все проекты сдали отчёты</li>";
+}
+
+function incompleteList() {
+  const model = currentDashboard();
+  if (!model.summary.projects) {
+    return "<li>Проекты ещё не добавлены</li>";
+  }
+
+  const partialNames = Array.isArray(model.summary.partialProjectNames) ? model.summary.partialProjectNames : [];
+  const missingNames = Array.isArray(model.summary.missingProjectNames) ? model.summary.missingProjectNames : [];
+  const partial = partialNames.map((name) => `<li>${escapeHtml(name)} · weekly частично</li>`);
+  const missing = missingNames.map((name) => `<li>${escapeHtml(name)} · ещё нет weekly</li>`);
+  const rows = [...partial, ...missing];
+  return rows.length
+    ? rows.join("")
+    : "<li>Полный weekly-комплект есть по всем проектам</li>";
 }
 
 function historyMarkup() {
@@ -1780,6 +2128,11 @@ function historyMarkup() {
 
   return model.history.map((week) => {
     const total = week.green + week.yellow + week.red || 1;
+    const submitted = week.submitted ?? total;
+    const projectTotal = week.projects ?? total;
+    const complete = week.complete ?? submitted;
+    const partial = week.partial ?? 0;
+    const pending = week.pending ?? Math.max(projectTotal - submitted, 0);
     return `
       <article class="historyWeek">
         <div class="historyDate">${escapeHtml(week.date)}</div>
@@ -1793,10 +2146,14 @@ function historyMarkup() {
           <div class="stackBar"><div class="stackFill" style="width:${(week.red / total) * 100}%;background:var(--red)"></div></div>
         </div>
         <div class="historyStats">
+          <span>Сдали: ${submitted}/${projectTotal}</span>
+          <span>Полный комплект: ${complete}</span>
+          <span>Частично: ${partial}</span>
+          <span>Без weekly: ${pending}</span>
           <span>Зелёных: ${week.green}</span>
           <span>Жёлтых: ${week.yellow}</span>
           <span>Красных: ${week.red}</span>
-          <strong>Среднее качество: ${week.avgQuality}%</strong>
+          <strong>Среднее качество: ${week.avgQuality != null ? `${week.avgQuality}%` : "—"}</strong>
         </div>
       </article>
     `;
@@ -2439,6 +2796,8 @@ function projectCardsMarkup() {
     `).join("");
 
     const flags = [
+      project.reportSubmitted && project.weeklyPackageLabel ? `<span class="chip">${escapeHtml(project.weeklyPackageLabel)}</span>` : "",
+      project.reportSubmitted && project.weeklyPackageLabel && !project.weeklyComplete ? `<span class="chip warn">Неполный weekly</span>` : "",
       project.escalation ? `<span class="chip danger">Эскалация</span>` : "",
       project.protocolStatus !== project.status ? `<span class="chip warn">Rating ≠ Protocol</span>` : "",
       !project.reportSubmitted ? `<span class="chip danger">Не сдал weekly</span>` : ""
@@ -2689,8 +3048,8 @@ function methodologyMarkup() {
           <ul class="methodList">
             <li>Все weekly-документы именуются по единому шаблону.</li>
             <li>Обязательные части имени: тип документа, дата сдачи, номер проекта, название проекта.</li>
-            <li>Ручные приписки вроде <strong>final</strong>, <strong>новый</strong>, <strong>(1)</strong> не допускаются.</li>
-            <li>Система должна валидировать имя файла до обработки содержимого.</li>
+            <li>Если имя неидеальное, сайт сначала пытается восстановить правильный шаблон по содержимому weekly.</li>
+            <li>Ручные приписки вроде <strong>final</strong> или <strong>(1)</strong> в репозиторий не попадают: при возможности сайт очищает их автоматически.</li>
           </ul>
           <ul class="namingExamples">
             <li><span class="codeLine">rating_04.05.2026_S-26-02_Партнер 2.0.md</span></li>
@@ -2724,7 +3083,7 @@ function methodologyMarkup() {
               Выбрать файлы
               <input id="validatorInput" type="file" multiple />
             </label>
-            <div class="validatorHint">Поддерживаемые маски: rating / project_protocol / checklist</div>
+            <div class="validatorHint">Поддерживаемые маски: rating / project_protocol / checklist. Если имя неидеальное, сайт попробует привести его автоматически.</div>
           </div>
           <div class="validatorResult">${validatorRows}</div>
         </div>
@@ -2904,19 +3263,19 @@ function overviewMarkup() {
     <section class="sectionStack">
       <section class="metricsGrid">
         <article class="card metricCard tone-accent">
-          <div class="metricLabel">Отчётов за новую неделю</div>
+          <div class="metricLabel">Проекты с weekly</div>
           <div class="metricValue">${model.summary.reportsForNewWeek}</div>
-          <div class="metricSub">Из ${model.summary.projects} проектов получили свежий weekly.</div>
+          <div class="metricSub">Из ${model.summary.projects} проектов. Полный комплект: ${model.summary.completeReports ?? 0}, частично: ${model.summary.partialReports ?? 0}.</div>
         </article>
         <article class="card metricCard tone-red">
-          <div class="metricLabel">Не сдали отчёты</div>
-          <div class="metricValue">${model.summary.missingReports}</div>
-          <div class="metricSub"><ul class="methodList">${missingList()}</ul></div>
+          <div class="metricLabel">Не закрыт weekly</div>
+          <div class="metricValue">${model.summary.incompleteReports ?? model.summary.missingReports}</div>
+          <div class="metricSub"><ul class="methodList">${incompleteList()}</ul></div>
         </article>
         <article class="card metricCard tone-green">
           <div class="metricLabel">Качество weekly</div>
-          <div class="metricValue">${model.summary.averageQuality}%</div>
-          <div class="metricSub">${model.summary.totalGreenChecks} зелёных пунктов из ${model.summary.totalPossibleChecks} по сданным отчётам недели.</div>
+          <div class="metricValue">${model.summary.averageQuality != null ? `${model.summary.averageQuality}%` : "—"}</div>
+          <div class="metricSub">${model.summary.totalPossibleChecks ? `${model.summary.totalGreenChecks} зелёных пунктов из ${model.summary.totalPossibleChecks} по сданным отчётам недели.` : "Чек-листы и rating за новую неделю ещё не догружены."}</div>
         </article>
         <article class="card metricCard tone-yellow">
           <div class="metricLabel">Светофор недели</div>
@@ -3045,9 +3404,9 @@ function render() {
 
   const validatorInput = document.getElementById("validatorInput");
   if (validatorInput) {
-    validatorInput.addEventListener("change", (event) => {
+    validatorInput.addEventListener("change", async (event) => {
       const files = [...event.target.files];
-      state.fileChecks = files.map(validateFileName);
+      state.fileChecks = await Promise.all(files.map(inspectWeeklyFile));
       render();
     });
   }
@@ -3195,32 +3554,7 @@ function render() {
 }
 
 function validateFileName(file) {
-  const name = file.name;
-  const parsed = parseFileName(name);
-
-  if (!parsed) {
-    return {
-      name,
-      valid: false,
-      message: "Неверное имя файла. Ожидается тип_ДД.ММ.ГГГГ_КодПроекта_НазваниеПроекта.(md|xlsx)"
-    };
-  }
-
-  const forbidden = /(final|новый|исправлено|версия|копия|\(\d+\))/iu;
-  if (forbidden.test(name)) {
-    return {
-      name,
-      valid: false,
-      message: "Имя прошло по маске, но содержит личные приписки. Уберите final / версия / (1) и подобные хвосты."
-    };
-  }
-
-  return {
-    name,
-    valid: true,
-    message: "Имя файла корректно и может быть принято системой.",
-    parsed
-  };
+  return inspectWeeklyFile(file);
 }
 
 async function refreshSnapshotState() {
@@ -3303,6 +3637,7 @@ async function buildRepoArchivePayload() {
     archiveDocs.push({
       id: item.id,
       name: item.name,
+      sourceName: item.sourceName || "",
       type: item.type,
       projectCode: item.projectCode,
       projectName: item.projectName,
@@ -3625,27 +3960,34 @@ async function saveArchiveFiles(files) {
     return;
   }
 
-  const checks = files.map(validateFileName);
+  const checks = await Promise.all(files.map(inspectWeeklyFile));
   state.fileChecks = checks;
 
   const invalid = checks.filter((item) => !item.valid);
   if (invalid.length) {
-    state.archiveMessage = "Часть файлов не сохранена: сначала поправьте имена по валидатору.";
+    state.archiveMessage = "Часть файлов не сохранена: для них не удалось автоматически определить тип, дату или проект.";
     render();
     return;
   }
 
   const uploadedDocs = [];
+  let renamedCount = 0;
 
-  for (const file of files) {
-    const { parsed } = validateFileName(file);
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const check = checks[index];
+    const { parsed, resolvedName } = check;
+    if (resolvedName !== file.name) {
+      renamedCount += 1;
+    }
     const blob = new Blob([await file.arrayBuffer()], {
       type: file.type || "application/octet-stream"
     });
     const savedAt = new Date().toISOString();
     await archivePut({
-      id: file.name,
-      name: file.name,
+      id: resolvedName,
+      name: resolvedName,
+      sourceName: file.name,
       type: parsed.type,
       projectCode: parsed.projectCode,
       projectName: parsed.projectName,
@@ -3658,8 +4000,10 @@ async function saveArchiveFiles(files) {
       blob
     });
     uploadedDocs.push({
-      id: file.name,
-      name: file.name,
+      id: resolvedName,
+      name: resolvedName,
+      sourceName: file.name,
+      targetName: resolvedName,
       type: parsed.type,
       projectCode: parsed.projectCode,
       projectName: parsed.projectName,
@@ -3668,7 +4012,7 @@ async function saveArchiveFiles(files) {
       size: file.size,
       mime: file.type || "application/octet-stream",
       savedAt,
-      filePath: `./archive/weekly/${file.name}`
+      filePath: `./archive/weekly/${resolvedName}`
     });
   }
 
@@ -3677,13 +4021,13 @@ async function saveArchiveFiles(files) {
   const token = activeGitHubToken();
 
   if (!uploadApiConfigured()) {
-    state.archiveMessage = `Сохранено файлов: ${files.length}. Сейчас они видны только локально в этом браузере, потому что сервис общей загрузки ещё не настроен.`;
+    state.archiveMessage = `Сохранено файлов: ${files.length}.${renamedCount ? ` Автопереименовано: ${renamedCount}.` : ""} Сейчас они видны только локально в этом браузере, потому что сервис общей загрузки ещё не настроен.`;
     render();
     return;
   }
 
   if (!token) {
-    state.archiveMessage = `Сохранено файлов: ${files.length}. Сейчас они видны только локально в этом браузере. Чтобы weekly увидели все, введите пароль загрузки.`;
+    state.archiveMessage = `Сохранено файлов: ${files.length}.${renamedCount ? ` Автопереименовано: ${renamedCount}.` : ""} Сейчас они видны только локально в этом браузере. Чтобы weekly увидели все, введите пароль загрузки.`;
     render();
     return;
   }
@@ -3695,8 +4039,8 @@ async function saveArchiveFiles(files) {
   try {
     const formData = new FormData();
     formData.append("documents", JSON.stringify(uploadedDocs));
-    for (const file of files) {
-      formData.append("files", file, file.name);
+    for (let index = 0; index < files.length; index += 1) {
+      formData.append("files", files[index], checks[index].resolvedName);
     }
     await callUploadApi("/weekly/upload", {
       method: "POST",
@@ -3708,7 +4052,7 @@ async function saveArchiveFiles(files) {
     state.snapshotRecords = await snapshotGetAll();
     await rebuildDashboardModel();
     persistGitHubSyncSettings();
-    state.archiveMessage = `Сохранено и опубликовано файлов: ${files.length}. Все вкладки сайта обновлены по общему архиву.`;
+    state.archiveMessage = `Сохранено и опубликовано файлов: ${files.length}.${renamedCount ? ` Автопереименовано: ${renamedCount}.` : ""} Все вкладки сайта обновлены по общему архиву.`;
     state.githubStatus = `Weekly опубликованы в общий архив ${repoLabel()}.`;
   } catch (error) {
     state.archiveMessage = `Файлы сохранены локально, но не опубликованы в общий архив: ${error.message}`;
