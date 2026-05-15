@@ -14,6 +14,10 @@ const state = {
   archiveLoading: true,
   archiveMessage: "",
   dashboardModel: dashboard,
+  githubToken: "",
+  githubRememberToken: true,
+  githubPublishing: false,
+  githubStatus: "",
   snapshotRecords: [],
   snapshotLoading: true,
   snapshotMessages: {},
@@ -31,6 +35,13 @@ const ARCHIVE_SEED_KEY = "operational-projects-b2b-archive-seed-20260508-v3";
 const ARCHIVE_ROLLBACK_KEY = "operational-projects-b2b-archive-rollback-20260508-v3";
 const SNAPSHOT_SEED_KEY = "operational-projects-b2b-snapshots-seed-20260508-v3";
 const REPO_ARCHIVE_SYNC_KEY = "operational-projects-b2b-repo-archive-sync-20260508-v1";
+const REPO_SYNC_SETTINGS_KEY = "operational-projects-b2b-github-sync-20260512-v1";
+const REPO_CONFIG = {
+  owner: "Aisaka42",
+  repo: "Oper.B2B",
+  branch: "main"
+};
+const UPLOAD_CONFIG = readUploadServiceConfig("oper-b2b");
 const ARCHIVE_ROLLBACK_IDS = [
   "project_protocol_24.04.2026_S-26-27_Новые продукты B2B.md",
   "checklist_27.04.2026_S-26-41_Рост производительности территориальных менеджеров.md",
@@ -143,6 +154,273 @@ function readRepoArchiveData() {
     archiveDocs: Array.isArray(source.archiveDocs) ? source.archiveDocs : [],
     snapshotRecords: Array.isArray(source.snapshotRecords) ? source.snapshotRecords : []
   };
+}
+
+function repoLabel() {
+  return `${REPO_CONFIG.owner}/${REPO_CONFIG.repo}`;
+}
+
+function repoRawBaseUrl() {
+  return `https://raw.githubusercontent.com/${REPO_CONFIG.owner}/${REPO_CONFIG.repo}/${REPO_CONFIG.branch}/`;
+}
+
+function repoContentsApiUrl(path = "") {
+  const normalized = String(path).replace(/^\/+/u, "");
+  const encoded = normalized.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return `https://api.github.com/repos/${REPO_CONFIG.owner}/${REPO_CONFIG.repo}/contents/${encoded}`;
+}
+
+function readUploadServiceConfig(defaultSiteId = "") {
+  const source = globalThis.archiveUploadConfig;
+  const apiBaseUrl = typeof source?.apiBaseUrl === "string"
+    ? source.apiBaseUrl.trim().replace(/\/+$/u, "")
+    : "";
+  const siteId = typeof source?.siteId === "string" && source.siteId.trim()
+    ? source.siteId.trim()
+    : defaultSiteId;
+
+  return {
+    apiBaseUrl,
+    siteId
+  };
+}
+
+function uploadApiConfigured() {
+  return Boolean(UPLOAD_CONFIG.apiBaseUrl);
+}
+
+function uploadApiBaseUrl() {
+  return UPLOAD_CONFIG.apiBaseUrl;
+}
+
+function uploadSiteId() {
+  return UPLOAD_CONFIG.siteId;
+}
+
+function uploadServiceLabel() {
+  return uploadApiBaseUrl() || "ещё не настроен";
+}
+
+function parseRepoArchiveScript(text = "") {
+  const match = String(text).match(/window\.archiveRepoData\s*=\s*(\{[\s\S]*\})\s*;?\s*$/u);
+  if (!match) {
+    throw new Error("В raw archive-store.js не найден объект archiveRepoData.");
+  }
+  return JSON.parse(match[1]);
+}
+
+function loadGitHubSyncSettings() {
+  try {
+    const raw = localStorage.getItem(REPO_SYNC_SETTINGS_KEY);
+    if (!raw) {
+      return { token: "", remember: true };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      token: typeof parsed.token === "string" ? parsed.token : "",
+      remember: parsed.remember !== false
+    };
+  } catch {
+    return { token: "", remember: true };
+  }
+}
+
+function persistGitHubSyncSettings() {
+  if (!state.githubRememberToken) {
+    localStorage.removeItem(REPO_SYNC_SETTINGS_KEY);
+    return;
+  }
+
+  localStorage.setItem(REPO_SYNC_SETTINGS_KEY, JSON.stringify({
+    token: state.githubToken.trim(),
+    remember: state.githubRememberToken
+  }));
+}
+
+function hydrateGitHubSyncSettings() {
+  const settings = loadGitHubSyncSettings();
+  state.githubToken = settings.token;
+  state.githubRememberToken = settings.remember;
+}
+
+function clearGitHubSyncSettings() {
+  state.githubToken = "";
+  state.githubRememberToken = true;
+  state.githubStatus = "Пароль загрузки очищен на этом устройстве.";
+  localStorage.removeItem(REPO_SYNC_SETTINGS_KEY);
+}
+
+async function refreshRemoteRepoArchiveData() {
+  const url = `${repoRawBaseUrl()}${REPO_ARCHIVE_FILE}?ts=${Date.now()}`;
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Не удалось прочитать общий архив из GitHub: ${response.status}`);
+  }
+  const text = await response.text();
+  const parsed = parseRepoArchiveScript(text);
+  globalThis.archiveRepoData = parsed;
+  return parsed;
+}
+
+async function uploadApiResponseError(response) {
+  try {
+    const data = await response.json();
+    if (data && typeof data.error === "string" && data.error.trim()) {
+      return data.error;
+    }
+  } catch {}
+
+  try {
+    const text = await response.text();
+    if (text.trim()) {
+      return text.trim();
+    }
+  } catch {}
+
+  return `HTTP ${response.status}`;
+}
+
+async function callUploadApi(path, { method = "GET", body = null, includePassword = true } = {}) {
+  if (!uploadApiConfigured()) {
+    throw new Error("Сервис общей загрузки ещё не настроен. Нужно заполнить upload-config.js.");
+  }
+
+  const url = new URL(path, `${uploadApiBaseUrl()}/`);
+  url.searchParams.set("siteId", uploadSiteId());
+
+  const headers = {
+    Accept: "application/json"
+  };
+
+  if (includePassword && state.githubToken.trim()) {
+    headers["x-upload-password"] = state.githubToken.trim();
+  }
+
+  let payload = body;
+  if (body && !(body instanceof FormData) && typeof body !== "string") {
+    headers["Content-Type"] = "application/json";
+    payload = JSON.stringify(body);
+  }
+
+  const response = await fetch(url.toString(), {
+    method,
+    headers,
+    body: payload
+  });
+
+  if (!response.ok) {
+    throw new Error(await uploadApiResponseError(response));
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  return response.text();
+}
+
+function githubHeaders(token = "", includeJson = false) {
+  const headers = {
+    Accept: "application/vnd.github+json"
+  };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  if (includeJson) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  return headers;
+}
+
+async function githubResponseError(response) {
+  let details = "";
+  try {
+    const body = await response.json();
+    details = body?.message || "";
+  } catch {
+    details = await response.text();
+  }
+  return details ? `${response.status} ${details}` : String(response.status);
+}
+
+async function githubGetContentMetadata(path, token) {
+  const response = await fetch(`${repoContentsApiUrl(path)}?ref=${encodeURIComponent(REPO_CONFIG.branch)}`, {
+    headers: githubHeaders(token)
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(await githubResponseError(response));
+  }
+
+  return response.json();
+}
+
+async function githubPutContent(path, contentBase64, message, token) {
+  const existing = await githubGetContentMetadata(path, token);
+  const body = {
+    message,
+    branch: REPO_CONFIG.branch,
+    content: contentBase64
+  };
+
+  if (existing?.sha) {
+    body.sha = existing.sha;
+  }
+
+  const response = await fetch(repoContentsApiUrl(path), {
+    method: "PUT",
+    headers: githubHeaders(token, true),
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    throw new Error(await githubResponseError(response));
+  }
+
+  return response.json();
+}
+
+async function githubDeleteContent(path, message, token) {
+  const existing = await githubGetContentMetadata(path, token);
+  if (!existing?.sha) {
+    return false;
+  }
+
+  const response = await fetch(repoContentsApiUrl(path), {
+    method: "DELETE",
+    headers: githubHeaders(token, true),
+    body: JSON.stringify({
+      message,
+      branch: REPO_CONFIG.branch,
+      sha: existing.sha
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(await githubResponseError(response));
+  }
+
+  return true;
+}
+
+async function verifyGitHubToken(token) {
+  const response = await fetch(`https://api.github.com/repos/${REPO_CONFIG.owner}/${REPO_CONFIG.repo}`, {
+    headers: githubHeaders(token)
+  });
+
+  if (!response.ok) {
+    throw new Error(await githubResponseError(response));
+  }
+
+  return response.json();
 }
 
 function base64ToBlob(base64, mime = "application/octet-stream") {
@@ -266,6 +544,16 @@ async function archiveDelete(id) {
   });
 }
 
+async function archiveClearAll() {
+  const db = await openArchiveDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ARCHIVE_STORE, "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore(ARCHIVE_STORE).clear();
+  });
+}
+
 async function snapshotGetAll() {
   const db = await openArchiveDb();
   return new Promise((resolve, reject) => {
@@ -300,7 +588,17 @@ async function snapshotDelete(id) {
   });
 }
 
-async function syncRepoArchiveSeed(force = false) {
+async function snapshotClearAll() {
+  const db = await openArchiveDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAPSHOT_STORE, "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore(SNAPSHOT_STORE).clear();
+  });
+}
+
+async function syncRepoArchiveSeed(force = false, replaceExisting = false) {
   const repoArchive = readRepoArchiveData();
   if (!repoArchive.version) {
     return { version: "", importedDocs: 0, importedSnapshots: 0 };
@@ -312,6 +610,11 @@ async function syncRepoArchiveSeed(force = false) {
 
   let importedDocs = 0;
   let importedSnapshots = 0;
+
+  if (replaceExisting) {
+    await archiveClearAll();
+    await snapshotClearAll();
+  }
 
   for (const item of repoArchive.archiveDocs) {
     const record = normalizeRepoArchiveDoc(item);
@@ -996,7 +1299,14 @@ function parseRatingDocument(doc, rawText) {
 }
 
 function resolveArchiveFileUrl(filePath, cacheKey = "") {
-  const url = new URL(filePath, window.location.href);
+  let url;
+  if (/^https?:\/\//iu.test(filePath)) {
+    url = new URL(filePath);
+  } else if (filePath.startsWith("./")) {
+    url = new URL(filePath.slice(2), repoRawBaseUrl());
+  } else {
+    url = new URL(filePath, window.location.href);
+  }
   if (cacheKey) {
     url.searchParams.set("_archive", cacheKey);
   }
@@ -2335,7 +2645,9 @@ function methodologyMarkup() {
             <li>Парсер понимает KPI-блоки как с заголовками <strong>###</strong>, так и <strong>####</strong>.</li>
             <li>Сохраняются две сущности: исходный файл устава и структурированный срез для интерфейса.</li>
             <li>Новый месяц не перезаписывает старые: история версий остаётся доступной по проекту, а в карточке проекта остаётся только просмотр.</li>
-            <li>Чтобы архив попал в репозиторий, после загрузки скачиваем новый <code>archive-store.js</code> и коммитим его вместе с сайтом.</li>
+            <li>В штатном режиме weekly и уставы уходят через Cloudflare Worker в GitHub-репозиторий сайта.</li>
+            <li>Менеджер вводит только общий пароль загрузки, а GitHub-доступ хранится внутри Worker.</li>
+            <li>Кнопка выгрузки <code>archive-store.js</code> остаётся как резервный аварийный экспорт.</li>
           </ul>
         </article>
 
@@ -2469,16 +2781,34 @@ function archiveMarkup() {
           </div>
         </div>
         <p>
-          Это рабочий контур хранения без отдельного backend: команда загружает все документы в одном месте, а карточки проектов потом только показывают уже сохранённые данные.
-          Для совместного командного архива следующим шагом уже нужен сервер или облачное хранилище.
+          Теперь общий архив публикуется через Cloudflare Worker. После успешной загрузки weekly или устава все вкладки сайта пересчитываются сразу, а остальные участники видят обновления после обычного обновления страницы.
         </p>
+        <div class="snapshotFormGrid">
+          <label class="field field-wide">
+            <span>Пароль загрузки</span>
+            <input type="password" data-github-token placeholder="Введите общий пароль" value="${escapeHtml(state.githubToken)}" ${state.githubPublishing ? "disabled" : ""} />
+          </label>
+          <label class="field">
+            <span>Сервис загрузки</span>
+            <input type="text" value="${escapeHtml(uploadServiceLabel())}" disabled />
+          </label>
+          <label class="field">
+            <span>Сайт</span>
+            <input type="text" value="${escapeHtml(uploadSiteId())}" disabled />
+          </label>
+        </div>
         <div class="archiveToolbar">
           <div class="validatorHint">
-            Для репозитория используется файл <code>${REPO_ARCHIVE_FILE}</code>. После weekly-загрузки или месячного устава скачайте обновлённый файл, замените им одноимённый файл в папке сайта и закоммитьте в репозиторий.
-            Текущая версия в коде: <code>${escapeHtml(repoVersionLabel)}</code>, weekly в файле: <code>${repoArchive.archiveDocs.length}</code>, уставов в файле: <code>${repoArchive.snapshotRecords.length}</code>.
+            Менеджер вводит только общий пароль. GitHub-доступ хранится внутри Cloudflare Worker, а сам сайт общается только с сервисом загрузки.
+            Репозиторий данных: <code>${escapeHtml(repoLabel())}</code>, текущая версия общего архива: <code>${escapeHtml(repoVersionLabel)}</code>, weekly в общем файле: <code>${repoArchive.archiveDocs.length}</code>, уставов: <code>${repoArchive.snapshotRecords.length}</code>.
           </div>
-          <button class="archiveButton accent" type="button" data-archive-export-repo>Скачать ${REPO_ARCHIVE_FILE}</button>
+          <label class="validatorHint"><input type="checkbox" data-github-remember ${state.githubRememberToken ? "checked" : ""} ${state.githubPublishing ? "disabled" : ""} /> Запомнить пароль на этом устройстве</label>
+          <button class="archiveButton accent" type="button" data-github-save ${state.githubPublishing ? "disabled" : ""}>Сохранить пароль</button>
+          <button class="archiveButton ghost" type="button" data-github-test ${state.githubToken ? "" : "disabled"} ${state.githubPublishing ? "disabled" : ""}>Проверить подключение</button>
+          <button class="archiveButton ghost" type="button" data-github-clear ${state.githubToken ? "" : "disabled"} ${state.githubPublishing ? "disabled" : ""}>Очистить</button>
+          <button class="archiveButton ghost" type="button" data-archive-export-repo ${state.githubPublishing ? "disabled" : ""}>Скачать ${REPO_ARCHIVE_FILE}</button>
         </div>
+        ${state.githubStatus ? `<div class="archiveNotice">${escapeHtml(state.githubStatus)}</div>` : ""}
       </article>
 
       <section class="metricsGrid archiveMetrics">
@@ -2520,15 +2850,15 @@ function archiveMarkup() {
         <div class="panelHeader">
           <div>
             <h2>Weekly-документы</h2>
-            <p>Протоколы и rating загружаются раз в неделю и хранятся здесь же. После сохранения сайт сразу обновляет сводку, проекты и рейтинг РП.</p>
+            <p>Протоколы и rating загружаются раз в неделю и хранятся здесь же. Если пароль загрузки введён, сайт сразу отправляет их через сервис в общий репозиторий и обновляет все вкладки.</p>
           </div>
         </div>
         <div class="archiveToolbar">
           <label class="fileLabel">
             Добавить weekly-документы
-            <input id="archiveInput" type="file" multiple accept=".md,.xlsx" />
+            <input id="archiveInput" type="file" multiple accept=".md,.xlsx" ${state.githubPublishing ? "disabled" : ""} />
           </label>
-          <button class="archiveButton accent" data-archive-download-all ${state.archiveDocs.length ? "" : "disabled"}>Скачать weekly</button>
+          <button class="archiveButton accent" data-archive-download-all ${state.archiveDocs.length ? "" : "disabled"} ${state.githubPublishing ? "disabled" : ""}>Скачать weekly</button>
         </div>
         <div class="archiveList">
           ${state.archiveLoading ? `<article class="archiveEmpty"><span>Читаю локальный архив…</span></article>` : rows}
@@ -2738,6 +3068,48 @@ function render() {
     });
   }
 
+  const githubTokenInput = app.querySelector("[data-github-token]");
+  if (githubTokenInput) {
+    githubTokenInput.addEventListener("input", () => {
+      state.githubToken = githubTokenInput.value.trim();
+    });
+  }
+
+  const githubRememberInput = app.querySelector("[data-github-remember]");
+  if (githubRememberInput) {
+    githubRememberInput.addEventListener("change", () => {
+      state.githubRememberToken = githubRememberInput.checked;
+    });
+  }
+
+  const githubSaveButton = app.querySelector("[data-github-save]");
+  if (githubSaveButton) {
+    githubSaveButton.addEventListener("click", () => {
+      if (!state.githubToken.trim()) {
+        state.githubStatus = "Сначала вставьте пароль загрузки.";
+      } else {
+        persistGitHubSyncSettings();
+        state.githubStatus = "Пароль загрузки сохранён на этом устройстве.";
+      }
+      render();
+    });
+  }
+
+  const githubTestButton = app.querySelector("[data-github-test]");
+  if (githubTestButton) {
+    githubTestButton.addEventListener("click", async () => {
+      await testGitHubConnection();
+    });
+  }
+
+  const githubClearButton = app.querySelector("[data-github-clear]");
+  if (githubClearButton) {
+    githubClearButton.addEventListener("click", () => {
+      clearGitHubSyncSettings();
+      render();
+    });
+  }
+
   app.querySelectorAll("[data-snapshot-project]").forEach((details) => {
     details.addEventListener("toggle", () => {
       state.openSnapshotProjects[details.dataset.snapshotProject] = details.open;
@@ -2869,8 +3241,16 @@ async function refreshArchiveState() {
   state.archiveLoading = true;
   render();
   try {
+    hydrateGitHubSyncSettings();
     const rollbackDone = await rollbackSeededArchiveDocs();
+    try {
+      await refreshRemoteRepoArchiveData();
+    } catch (error) {
+      state.githubStatus = `Работаю по встроенной копии архива: ${error.message}`;
+    }
+    await syncRepoArchiveSeed(true, true);
     state.archiveDocs = await archiveGetAll();
+    state.snapshotRecords = await snapshotGetAll();
     await rebuildDashboardModel();
     if (rollbackDone) {
       state.archiveMessage = "Автозагрузка из папок отменена. Импортированные документы убраны из локального архива.";
@@ -2884,6 +3264,7 @@ async function refreshArchiveState() {
 }
 
 async function initializeArchiveLayer() {
+  hydrateGitHubSyncSettings();
   state.archiveLoading = true;
   state.snapshotLoading = true;
   render();
@@ -2891,7 +3272,12 @@ async function initializeArchiveLayer() {
   try {
     const rollbackDone = await rollbackSeededArchiveDocs();
     await seedCharterSnapshots();
-    const repoSync = await syncRepoArchiveSeed();
+    try {
+      await refreshRemoteRepoArchiveData();
+    } catch (error) {
+      state.githubStatus = `Общий архив из GitHub сейчас не прочитался, использую встроенную копию: ${error.message}`;
+    }
+    const repoSync = await syncRepoArchiveSeed(true, true);
     state.archiveDocs = await archiveGetAll();
     state.snapshotRecords = await snapshotGetAll();
     await rebuildDashboardModel();
@@ -2926,7 +3312,7 @@ async function buildRepoArchivePayload() {
       mime: item.mime,
       savedAt: item.savedAt,
       filePath: item.filePath || "",
-      contentBase64: item.blob ? await blobToBase64(item.blob) : ""
+      contentBase64: item.filePath ? "" : (item.blob ? await blobToBase64(item.blob) : "")
     });
   }
 
@@ -2949,7 +3335,7 @@ async function buildRepoArchivePayload() {
     sourceFileName: item.sourceFileName,
     sourceMime: item.sourceMime,
     sourceSize: item.sourceSize,
-    sourceText: item.sourceText || "",
+    sourceText: item.sourceFilePath ? "" : (item.sourceText || ""),
     sourceFilePath: item.sourceFilePath || ""
   }));
 
@@ -2979,6 +3365,83 @@ async function exportRepoArchiveFile() {
   downloadTextFile(REPO_ARCHIVE_FILE, fileBody, "text/javascript;charset=utf-8");
   state.archiveMessage = `Файл ${REPO_ARCHIVE_FILE} скачан. Замените им одноимённый файл в папке сайта и закоммитьте в репозиторий.`;
   render();
+}
+
+function activeGitHubToken() {
+  return state.githubToken.trim();
+}
+
+async function publishRepoArchiveStateToGitHub(token, message) {
+  const payload = await buildRepoArchivePayload();
+  const fileBody = `window.archiveRepoData = ${JSON.stringify(payload, null, 2)};\n`;
+  const contentBase64 = await blobToBase64(new Blob([fileBody], { type: "text/javascript;charset=utf-8" }));
+  await githubPutContent(REPO_ARCHIVE_FILE, contentBase64, message, token);
+  globalThis.archiveRepoData = payload;
+  localStorage.setItem(REPO_ARCHIVE_SYNC_KEY, payload.version);
+  return payload;
+}
+
+async function publishWeeklyFilesToGitHub(files, token) {
+  for (const file of files) {
+    const blob = new Blob([await file.arrayBuffer()], {
+      type: file.type || "application/octet-stream"
+    });
+    const contentBase64 = await blobToBase64(blob);
+    await githubPutContent(
+      `archive/weekly/${file.name}`,
+      contentBase64,
+      `Upload weekly ${file.name}`,
+      token
+    );
+
+    const existing = state.archiveDocs.find((item) => item.id === file.name);
+    if (existing) {
+      await archivePut({
+        ...existing,
+        filePath: `./archive/weekly/${file.name}`
+      });
+    }
+  }
+}
+
+async function publishSnapshotSourceToGitHub(file, token) {
+  const blob = new Blob([await file.arrayBuffer()], {
+    type: file.type || "text/markdown"
+  });
+  const contentBase64 = await blobToBase64(blob);
+  const repoPath = `archive/charters/${file.name}`;
+  await githubPutContent(repoPath, contentBase64, `Upload charter ${file.name}`, token);
+  return `./${repoPath}`;
+}
+
+async function testGitHubConnection() {
+  if (!uploadApiConfigured()) {
+    state.githubStatus = "Сервис общей загрузки пока не настроен. Сначала заполните upload-config.js.";
+    render();
+    return;
+  }
+
+  const password = activeGitHubToken();
+  if (!password) {
+    state.githubStatus = "Сначала вставьте пароль загрузки.";
+    render();
+    return;
+  }
+
+  state.githubPublishing = true;
+  state.githubStatus = "Проверяю сервис общей загрузки…";
+  render();
+
+  try {
+    const result = await callUploadApi("/health");
+    state.githubStatus = `Сервис подключён: можно публиковать в ${result.repo}.`;
+    persistGitHubSyncSettings();
+  } catch (error) {
+    state.githubStatus = `Не удалось проверить пароль или сервис загрузки: ${error.message}`;
+  } finally {
+    state.githubPublishing = false;
+    render();
+  }
 }
 
 async function saveSnapshotFromArchiveForm(form) {
@@ -3025,6 +3488,9 @@ async function saveSnapshotFromArchiveForm(form) {
   const existingMonth = state.snapshotRecords.filter(
     (record) => record.projectCode === projectCode && record.snapshotMonth === snapshotMonth
   );
+  const replaceSnapshotIds = existingMonth.length && strategy === "replace-month"
+    ? existingMonth.map((record) => record.id)
+    : [];
 
   if (existingMonth.length && strategy === "replace-month") {
     const confirmed = window.confirm(
@@ -3065,8 +3531,42 @@ async function saveSnapshotFromArchiveForm(form) {
     sourceFileName: file.name,
     sourceMime: file.type || "text/markdown",
     sourceSize: file.size,
-    sourceText: text
+    sourceText: text,
+    sourceFilePath: ""
   };
+
+  const token = activeGitHubToken();
+  let sharedPublished = false;
+
+  if (uploadApiConfigured() && token) {
+    state.githubPublishing = true;
+    state.githubStatus = `Отправляю устав ${projectCode} в общий архив…`;
+    render();
+    try {
+      const formData = new FormData();
+      formData.append("file", file, file.name);
+      formData.append("record", JSON.stringify({
+        ...record,
+        sourceText: "",
+        sourceFilePath: ""
+      }));
+      formData.append("replaceSnapshotIds", JSON.stringify(replaceSnapshotIds));
+      const result = await callUploadApi("/charter/upload", {
+        method: "POST",
+        body: formData
+      });
+      record.sourceFilePath = result.record?.sourceFilePath || `./archive/charters/${file.name}`;
+      record.sourceText = "";
+      sharedPublished = true;
+      persistGitHubSyncSettings();
+      state.githubStatus = `Устав ${file.name} отправлен в общий архив.`;
+    } catch (error) {
+      state.githubStatus = `Устав пока сохранён только локально: ${error.message}`;
+    } finally {
+      state.githubPublishing = false;
+      render();
+    }
+  }
 
   await snapshotPut(record);
   state.snapshotRecords = await snapshotGetAll();
@@ -3075,13 +3575,39 @@ async function saveSnapshotFromArchiveForm(form) {
   state.snapshotTabs[projectCode] = "overview";
   state.openSnapshotProjects[projectCode] = true;
 
+  if (sharedPublished) {
+    state.githubPublishing = true;
+    state.githubStatus = "Обновляю общий архив уставов на сайте…";
+    render();
+    try {
+      await refreshRemoteRepoArchiveData();
+      await syncRepoArchiveSeed(true, true);
+      state.archiveDocs = await archiveGetAll();
+      state.snapshotRecords = await snapshotGetAll();
+      await rebuildDashboardModel();
+      state.githubStatus = `Устав ${projectCode} опубликован в общий архив ${repoLabel()}.`;
+    } catch (error) {
+      state.githubStatus = `Устав загружен локально, но общий архив не обновился: ${error.message}`;
+    } finally {
+      state.githubPublishing = false;
+      render();
+    }
+  }
+
   const duplicateText = existingMonth.length && strategy === "new-version"
     ? " Срез сохранён как новая версия того же месяца."
     : "";
   const warningText = parsed.warnings.length
     ? ` Предупреждения: ${parsed.warnings.join(" ")}`
     : "";
-  state.archiveMessage = `Устав ${projectCode} за ${parseMonthInput(snapshotMonth)} сохранён.${duplicateText}${warningText}`;
+  const localReason = !uploadApiConfigured()
+    ? " Сервис общей загрузки ещё не настроен."
+    : token
+      ? ""
+      : " Чтобы его увидели все, введите пароль загрузки.";
+  state.archiveMessage = sharedPublished
+    ? `Устав ${projectCode} за ${parseMonthInput(snapshotMonth)} сохранён и опубликован.${duplicateText}${warningText}`
+    : `Устав ${projectCode} за ${parseMonthInput(snapshotMonth)} сохранён локально.${duplicateText}${warningText}${localReason}`;
   state.snapshotMessages[projectCode] = state.archiveMessage;
 
   form.reset();
@@ -3109,11 +3635,14 @@ async function saveArchiveFiles(files) {
     return;
   }
 
+  const uploadedDocs = [];
+
   for (const file of files) {
     const { parsed } = validateFileName(file);
     const blob = new Blob([await file.arrayBuffer()], {
       type: file.type || "application/octet-stream"
     });
+    const savedAt = new Date().toISOString();
     await archivePut({
       id: file.name,
       name: file.name,
@@ -3124,14 +3653,69 @@ async function saveArchiveFiles(files) {
       ext: parsed.ext,
       size: file.size,
       mime: file.type || "application/octet-stream",
-      savedAt: new Date().toISOString(),
+      savedAt,
+      filePath: "",
       blob
+    });
+    uploadedDocs.push({
+      id: file.name,
+      name: file.name,
+      type: parsed.type,
+      projectCode: parsed.projectCode,
+      projectName: parsed.projectName,
+      periodDate: parsed.date,
+      ext: parsed.ext,
+      size: file.size,
+      mime: file.type || "application/octet-stream",
+      savedAt,
+      filePath: `./archive/weekly/${file.name}`
     });
   }
 
-  state.archiveMessage = `Сохранено файлов: ${files.length}. Теперь их можно скачать из локального архива в любое время.`;
   state.archiveDocs = await archiveGetAll();
   await rebuildDashboardModel();
+  const token = activeGitHubToken();
+
+  if (!uploadApiConfigured()) {
+    state.archiveMessage = `Сохранено файлов: ${files.length}. Сейчас они видны только локально в этом браузере, потому что сервис общей загрузки ещё не настроен.`;
+    render();
+    return;
+  }
+
+  if (!token) {
+    state.archiveMessage = `Сохранено файлов: ${files.length}. Сейчас они видны только локально в этом браузере. Чтобы weekly увидели все, введите пароль загрузки.`;
+    render();
+    return;
+  }
+
+  state.githubPublishing = true;
+  state.githubStatus = "Отправляю weekly в общий архив…";
+  render();
+
+  try {
+    const formData = new FormData();
+    formData.append("documents", JSON.stringify(uploadedDocs));
+    for (const file of files) {
+      formData.append("files", file, file.name);
+    }
+    await callUploadApi("/weekly/upload", {
+      method: "POST",
+      body: formData
+    });
+    await refreshRemoteRepoArchiveData();
+    await syncRepoArchiveSeed(true, true);
+    state.archiveDocs = await archiveGetAll();
+    state.snapshotRecords = await snapshotGetAll();
+    await rebuildDashboardModel();
+    persistGitHubSyncSettings();
+    state.archiveMessage = `Сохранено и опубликовано файлов: ${files.length}. Все вкладки сайта обновлены по общему архиву.`;
+    state.githubStatus = `Weekly опубликованы в общий архив ${repoLabel()}.`;
+  } catch (error) {
+    state.archiveMessage = `Файлы сохранены локально, но не опубликованы в общий архив: ${error.message}`;
+    state.githubStatus = `Не удалось отправить weekly через сервис загрузки: ${error.message}`;
+  } finally {
+    state.githubPublishing = false;
+  }
   render();
 }
 
@@ -3141,7 +3725,7 @@ async function downloadSnapshotDocument(id) {
 
   if (item.sourceFilePath) {
     const link = document.createElement("a");
-    link.href = item.sourceFilePath;
+    link.href = resolveArchiveFileUrl(item.sourceFilePath, item.uploadedAt || item.id || Date.now());
     link.download = item.sourceFileName || `${item.projectCode}_${item.snapshotMonth}.md`;
     document.body.append(link);
     link.click();
@@ -3173,7 +3757,7 @@ async function downloadArchiveDocument(id) {
   if (!item) return;
   if (item.filePath && !item.blob) {
     const link = document.createElement("a");
-    link.href = item.filePath;
+    link.href = resolveArchiveFileUrl(item.filePath, item.savedAt || item.id || Date.now());
     link.download = item.name;
     document.body.append(link);
     link.click();
@@ -3192,9 +3776,41 @@ async function downloadArchiveDocument(id) {
 }
 
 async function deleteArchiveDocument(id) {
+  const item = state.archiveDocs.find((doc) => doc.id === id);
   await archiveDelete(id);
   state.archiveDocs = await archiveGetAll();
   await rebuildDashboardModel();
+  const token = activeGitHubToken();
+
+  if (item && uploadApiConfigured() && token) {
+    state.githubPublishing = true;
+    state.githubStatus = `Удаляю ${item.name} из общего архива…`;
+    render();
+    try {
+      await callUploadApi("/weekly/delete", {
+        method: "POST",
+        body: {
+          documentId: item.id,
+          fileName: item.name
+        }
+      });
+      await refreshRemoteRepoArchiveData();
+      await syncRepoArchiveSeed(true, true);
+      state.archiveDocs = await archiveGetAll();
+      state.snapshotRecords = await snapshotGetAll();
+      await rebuildDashboardModel();
+      state.archiveMessage = "Документ удалён из локального и общего архива.";
+      state.githubStatus = `Документ ${item.name} удалён из ${repoLabel()}.`;
+    } catch (error) {
+      state.archiveMessage = `Документ удалён локально, но не удалён из общего архива: ${error.message}`;
+      state.githubStatus = `Не удалось удалить weekly через сервис загрузки: ${error.message}`;
+    } finally {
+      state.githubPublishing = false;
+      render();
+    }
+    return;
+  }
+
   state.archiveMessage = "Документ удалён из локального архива.";
   render();
 }
@@ -3219,6 +3835,34 @@ async function deleteSnapshotDocument(id) {
     delete state.compareSnapshotIds[item.projectCode];
   }
 
+  const token = activeGitHubToken();
+  if (uploadApiConfigured() && token) {
+    state.githubPublishing = true;
+    state.githubStatus = `Обновляю общий архив уставов после удаления ${item.projectCode}…`;
+    render();
+    try {
+      await callUploadApi("/charter/delete", {
+        method: "POST",
+        body: {
+          snapshotId: item.id,
+          sourceFilePath: item.sourceFilePath || ""
+        }
+      });
+      await refreshRemoteRepoArchiveData();
+      await syncRepoArchiveSeed(true, true);
+      state.archiveDocs = await archiveGetAll();
+      state.snapshotRecords = await snapshotGetAll();
+      await rebuildDashboardModel();
+      state.githubStatus = `Срез ${item.projectCode} удалён из общего архива ${repoLabel()}.`;
+    } catch (error) {
+      state.githubStatus = `Срез удалён локально, но общий архив не обновился: ${error.message}`;
+    } finally {
+      state.githubPublishing = false;
+      render();
+    }
+    return;
+  }
+
   render();
 }
 
@@ -3238,6 +3882,34 @@ async function toggleSnapshotVerification(id) {
     : "Срез отмечен как проверенный.";
   state.archiveMessage = state.snapshotMessages[item.projectCode];
   state.openSnapshotProjects[item.projectCode] = true;
+
+  const token = activeGitHubToken();
+  if (uploadApiConfigured() && token) {
+    state.githubPublishing = true;
+    state.githubStatus = "Публикую обновлённый статус проверки в общий архив…";
+    render();
+    try {
+      await callUploadApi("/charter/verify", {
+        method: "POST",
+        body: {
+          snapshotRecord: updated
+        }
+      });
+      await refreshRemoteRepoArchiveData();
+      await syncRepoArchiveSeed(true, true);
+      state.archiveDocs = await archiveGetAll();
+      state.snapshotRecords = await snapshotGetAll();
+      await rebuildDashboardModel();
+      state.githubStatus = `Статус проверки среза опубликован в ${repoLabel()}.`;
+    } catch (error) {
+      state.githubStatus = `Статус проверки изменён только локально: ${error.message}`;
+    } finally {
+      state.githubPublishing = false;
+      render();
+    }
+    return;
+  }
+
   render();
 }
 
