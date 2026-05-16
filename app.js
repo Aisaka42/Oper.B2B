@@ -108,21 +108,29 @@ function escapeHtml(value = "") {
 }
 
 function formatDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value ? String(value) : "—";
+  }
   return new Intl.DateTimeFormat("ru-RU", {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit"
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function formatShortDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value ? String(value) : "—";
+  }
   return new Intl.DateTimeFormat("ru-RU", {
     day: "2-digit",
     month: "2-digit",
     year: "numeric"
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function formatBytes(bytes = 0) {
@@ -154,6 +162,17 @@ function readRepoArchiveData() {
     archiveDocs: Array.isArray(source.archiveDocs) ? source.archiveDocs : [],
     snapshotRecords: Array.isArray(source.snapshotRecords) ? source.snapshotRecords : []
   };
+}
+
+function applyRepoArchiveData(source) {
+  const next = {
+    site: typeof source?.site === "string" ? source.site : "",
+    version: typeof source?.version === "string" ? source.version : "",
+    archiveDocs: Array.isArray(source?.archiveDocs) ? source.archiveDocs : [],
+    snapshotRecords: Array.isArray(source?.snapshotRecords) ? source.snapshotRecords : []
+  };
+  globalThis.archiveRepoData = next;
+  return next;
 }
 
 function repoLabel() {
@@ -258,8 +277,19 @@ async function refreshRemoteRepoArchiveData() {
   }
   const text = await response.text();
   const parsed = parseRepoArchiveScript(text);
-  globalThis.archiveRepoData = parsed;
-  return parsed;
+  return applyRepoArchiveData(parsed);
+}
+
+async function syncArchiveFromUploadResult(result) {
+  if (result?.archiveData) {
+    applyRepoArchiveData(result.archiveData);
+  } else {
+    await refreshRemoteRepoArchiveData();
+  }
+  await syncRepoArchiveSeed(true, true);
+  state.archiveDocs = await archiveGetAll();
+  state.snapshotRecords = await snapshotGetAll();
+  await rebuildDashboardModel();
 }
 
 async function uploadApiResponseError(response) {
@@ -3127,7 +3157,7 @@ function archiveMarkup() {
     : `
       <article class="archiveEmpty">
         <strong>Архив пока пуст.</strong>
-        <span>Загрузите протоколы и rating. Если есть чек-листы, сайт тоже примет их и учтёт в расчётах. Файлы сохранятся локально в браузере этого ноутбука и будут доступны для скачивания позже.</span>
+        <span>${repoArchive.archiveDocs.length ? `В общем архиве уже есть ${repoArchive.archiveDocs.length} weekly-файлов, но локальный слой их сейчас не показал. Нажмите «Пересинхронизировать архив».` : "Загрузите протоколы и rating. Если есть чек-листы, сайт тоже примет их и учтёт в расчётах. Файлы сохранятся локально в браузере этого ноутбука и будут доступны для скачивания позже."}</span>
       </article>
     `;
 
@@ -3165,6 +3195,7 @@ function archiveMarkup() {
           <label class="validatorHint"><input type="checkbox" data-github-remember ${state.githubRememberToken ? "checked" : ""} ${state.githubPublishing ? "disabled" : ""} /> Запомнить пароль на этом устройстве</label>
           <button class="archiveButton accent" type="button" data-github-save ${state.githubPublishing ? "disabled" : ""}>Сохранить пароль</button>
           <button class="archiveButton ghost" type="button" data-github-test ${state.githubToken ? "" : "disabled"} ${state.githubPublishing ? "disabled" : ""}>Проверить подключение</button>
+          <button class="archiveButton ghost" type="button" data-archive-resync ${state.githubPublishing ? "disabled" : ""}>Пересинхронизировать архив</button>
           <button class="archiveButton ghost" type="button" data-github-clear ${state.githubToken ? "" : "disabled"} ${state.githubPublishing ? "disabled" : ""}>Очистить</button>
           <button class="archiveButton ghost" type="button" data-archive-export-repo ${state.githubPublishing ? "disabled" : ""}>Скачать ${REPO_ARCHIVE_FILE}</button>
         </div>
@@ -3425,6 +3456,13 @@ function render() {
   if (exportRepoButton) {
     exportRepoButton.addEventListener("click", async () => {
       await exportRepoArchiveFile();
+    });
+  }
+
+  const archiveResyncButton = app.querySelector("[data-archive-resync]");
+  if (archiveResyncButton) {
+    archiveResyncButton.addEventListener("click", async () => {
+      await refreshArchiveState();
     });
   }
 
@@ -3873,6 +3911,7 @@ async function saveSnapshotFromArchiveForm(form) {
 
   const token = activeGitHubToken();
   let sharedPublished = false;
+  let publishedResult = null;
 
   if (uploadApiConfigured() && token) {
     state.githubPublishing = true;
@@ -3891,6 +3930,7 @@ async function saveSnapshotFromArchiveForm(form) {
         method: "POST",
         body: formData
       });
+      publishedResult = result;
       record.sourceFilePath = result.record?.sourceFilePath || `./archive/charters/${file.name}`;
       record.sourceText = "";
       sharedPublished = true;
@@ -3916,11 +3956,7 @@ async function saveSnapshotFromArchiveForm(form) {
     state.githubStatus = "Обновляю общий архив уставов на сайте…";
     render();
     try {
-      await refreshRemoteRepoArchiveData();
-      await syncRepoArchiveSeed(true, true);
-      state.archiveDocs = await archiveGetAll();
-      state.snapshotRecords = await snapshotGetAll();
-      await rebuildDashboardModel();
+      await syncArchiveFromUploadResult(publishedResult);
       state.githubStatus = `Устав ${projectCode} опубликован в общий архив ${repoLabel()}.`;
     } catch (error) {
       state.githubStatus = `Устав загружен локально, но общий архив не обновился: ${error.message}`;
@@ -4055,15 +4091,11 @@ async function saveArchiveFiles(files) {
     for (let index = 0; index < files.length; index += 1) {
       formData.append("files", files[index], checks[index].resolvedName);
     }
-    await callUploadApi("/weekly/upload", {
+    const result = await callUploadApi("/weekly/upload", {
       method: "POST",
       body: formData
     });
-    await refreshRemoteRepoArchiveData();
-    await syncRepoArchiveSeed(true, true);
-    state.archiveDocs = await archiveGetAll();
-    state.snapshotRecords = await snapshotGetAll();
-    await rebuildDashboardModel();
+    await syncArchiveFromUploadResult(result);
     persistGitHubSyncSettings();
     state.archiveMessage = `Сохранено и опубликовано файлов: ${files.length}.${renamedCount ? ` Автопереименовано: ${renamedCount}.` : ""}${replacedCount ? ` Обновлено существующих weekly: ${replacedCount}.` : ""}${uploadedOnlyPastWeeks ? ` Файлы относятся к более ранней неделе (${uploadedWeeks.join(", ")}), поэтому верхняя сводка текущей недели не изменилась, а история и динамика пересчитаны.` : " Все вкладки сайта обновлены по общему архиву."}`;
     state.githubStatus = `Weekly опубликованы в общий архив ${repoLabel()}.`;
@@ -4144,18 +4176,14 @@ async function deleteArchiveDocument(id) {
     state.githubStatus = `Удаляю ${item.name} из общего архива…`;
     render();
     try {
-      await callUploadApi("/weekly/delete", {
+      const result = await callUploadApi("/weekly/delete", {
         method: "POST",
         body: {
           documentId: item.id,
           fileName: item.name
         }
       });
-      await refreshRemoteRepoArchiveData();
-      await syncRepoArchiveSeed(true, true);
-      state.archiveDocs = await archiveGetAll();
-      state.snapshotRecords = await snapshotGetAll();
-      await rebuildDashboardModel();
+      await syncArchiveFromUploadResult(result);
       state.archiveMessage = "Документ удалён из локального и общего архива.";
       state.githubStatus = `Документ ${item.name} удалён из ${repoLabel()}.`;
     } catch (error) {
@@ -4198,18 +4226,14 @@ async function deleteSnapshotDocument(id) {
     state.githubStatus = `Обновляю общий архив уставов после удаления ${item.projectCode}…`;
     render();
     try {
-      await callUploadApi("/charter/delete", {
+      const result = await callUploadApi("/charter/delete", {
         method: "POST",
         body: {
           snapshotId: item.id,
           sourceFilePath: item.sourceFilePath || ""
         }
       });
-      await refreshRemoteRepoArchiveData();
-      await syncRepoArchiveSeed(true, true);
-      state.archiveDocs = await archiveGetAll();
-      state.snapshotRecords = await snapshotGetAll();
-      await rebuildDashboardModel();
+      await syncArchiveFromUploadResult(result);
       state.githubStatus = `Срез ${item.projectCode} удалён из общего архива ${repoLabel()}.`;
     } catch (error) {
       state.githubStatus = `Срез удалён локально, но общий архив не обновился: ${error.message}`;
@@ -4246,17 +4270,13 @@ async function toggleSnapshotVerification(id) {
     state.githubStatus = "Публикую обновлённый статус проверки в общий архив…";
     render();
     try {
-      await callUploadApi("/charter/verify", {
+      const result = await callUploadApi("/charter/verify", {
         method: "POST",
         body: {
           snapshotRecord: updated
         }
       });
-      await refreshRemoteRepoArchiveData();
-      await syncRepoArchiveSeed(true, true);
-      state.archiveDocs = await archiveGetAll();
-      state.snapshotRecords = await snapshotGetAll();
-      await rebuildDashboardModel();
+      await syncArchiveFromUploadResult(result);
       state.githubStatus = `Статус проверки среза опубликован в ${repoLabel()}.`;
     } catch (error) {
       state.githubStatus = `Статус проверки изменён только локально: ${error.message}`;
