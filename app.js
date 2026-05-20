@@ -280,11 +280,37 @@ async function refreshRemoteRepoArchiveData() {
   return applyRepoArchiveData(parsed);
 }
 
+function resolveLiveArchiveFileUrl(filePath, cacheKey = "", fileName = "") {
+  const normalizedPath = String(filePath || "").replace(/^\.\//u, "");
+  const url = new URL("/archive/file", `${uploadApiBaseUrl()}/`);
+  url.searchParams.set("siteId", uploadSiteId());
+  url.searchParams.set("path", normalizedPath);
+  if (cacheKey) {
+    url.searchParams.set("_archive", String(cacheKey));
+  }
+  if (fileName) {
+    url.searchParams.set("name", fileName);
+  }
+  return url.toString();
+}
+
+async function refreshSharedArchiveData() {
+  if (uploadApiConfigured()) {
+    const result = await callUploadApi("/archive", { includePassword: false });
+    if (result?.archiveData) {
+      return applyRepoArchiveData(result.archiveData);
+    }
+    throw new Error("Сервис загрузки не вернул archiveData.");
+  }
+
+  return refreshRemoteRepoArchiveData();
+}
+
 async function syncArchiveFromUploadResult(result) {
   if (result?.archiveData) {
     applyRepoArchiveData(result.archiveData);
   } else {
-    await refreshRemoteRepoArchiveData();
+    await refreshSharedArchiveData();
   }
   await syncRepoArchiveSeed(true, true);
   state.archiveDocs = await archiveGetAll();
@@ -1582,8 +1608,11 @@ function parseRatingDocument(doc, rawText) {
   };
 }
 
-function resolveArchiveFileUrl(filePath, cacheKey = "") {
+function resolveArchiveFileUrl(filePath, cacheKey = "", fileName = "") {
   let url;
+  if (uploadApiConfigured() && String(filePath || "").startsWith("./")) {
+    return resolveLiveArchiveFileUrl(filePath, cacheKey, fileName);
+  }
   if (/^https?:\/\//iu.test(filePath)) {
     url = new URL(filePath);
   } else if (filePath.startsWith("./")) {
@@ -3617,9 +3646,9 @@ async function refreshArchiveState() {
     hydrateGitHubSyncSettings();
     const rollbackDone = await rollbackSeededArchiveDocs();
     try {
-      await refreshRemoteRepoArchiveData();
+      await refreshSharedArchiveData();
     } catch (error) {
-      state.githubStatus = `Работаю по встроенной копии архива: ${error.message}`;
+      state.githubStatus = `Живой архив сейчас не прочитался, использую встроенную копию: ${error.message}`;
     }
     await syncRepoArchiveSeed(true, true);
     state.archiveDocs = await archiveGetAll();
@@ -3646,9 +3675,9 @@ async function initializeArchiveLayer() {
     const rollbackDone = await rollbackSeededArchiveDocs();
     await seedCharterSnapshots();
     try {
-      await refreshRemoteRepoArchiveData();
+      await refreshSharedArchiveData();
     } catch (error) {
-      state.githubStatus = `Общий архив из GitHub сейчас не прочитался, использую встроенную копию: ${error.message}`;
+      state.githubStatus = `Живой архив сейчас не прочитался, использую встроенную копию: ${error.message}`;
     }
     const repoSync = await syncRepoArchiveSeed(true, true);
     state.archiveDocs = await archiveGetAll();
@@ -4114,7 +4143,7 @@ async function downloadSnapshotDocument(id) {
 
   if (item.sourceFilePath) {
     const link = document.createElement("a");
-    link.href = resolveArchiveFileUrl(item.sourceFilePath, item.uploadedAt || item.id || Date.now());
+    link.href = resolveArchiveFileUrl(item.sourceFilePath, item.uploadedAt || item.id || Date.now(), item.sourceFileName || `${item.projectCode}_${item.snapshotMonth}.md`);
     link.download = item.sourceFileName || `${item.projectCode}_${item.snapshotMonth}.md`;
     document.body.append(link);
     link.click();
@@ -4146,7 +4175,7 @@ async function downloadArchiveDocument(id) {
   if (!item) return;
   if (item.filePath && !item.blob) {
     const link = document.createElement("a");
-    link.href = resolveArchiveFileUrl(item.filePath, item.savedAt || item.id || Date.now());
+    link.href = resolveArchiveFileUrl(item.filePath, item.savedAt || item.id || Date.now(), item.name);
     link.download = item.name;
     document.body.append(link);
     link.click();
