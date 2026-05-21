@@ -1,6 +1,6 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-21T01:29:59.538Z",
+  "version": "2026-05-21T01:30:21.739Z",
   "archiveDocs": [
     {
       "id": "rating_04.05.2026_S-26-02_Партнер 2.0.md",
@@ -57,7 +57,7 @@ window.archiveRepoData = {
         "Для выбранного месяца есть незаполненный факт: Выручка B2O, 2 квартал, руб. с НДС."
       ],
       "errors": [],
-      "status": "needs-review",
+      "status": "verified",
       "uploadedAt": "2026-05-21T01:29:58.151Z",
       "uploadedBy": "долженко диана",
       "comment": "",
@@ -65,7 +65,8 @@ window.archiveRepoData = {
       "sourceMime": "text/markdown",
       "sourceSize": 11693,
       "sourceText": "",
-      "sourceFilePath": "./archive/charters/Устав 2Квартал.md"
+      "sourceFilePath": "./archive/charters/Устав 2Квартал.md",
+      "verifiedAt": "2026-05-21T01:30:04.715Z"
     }
   ]
 };
