@@ -1,7 +1,21 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-21T01:42:32.214Z",
+  "version": "2026-05-21T02:22:32.681Z",
   "archiveDocs": [
+    {
+      "id": "project_protocol_04.05.2026_S-26-02_Партнер 2.0.md",
+      "name": "project_protocol_04.05.2026_S-26-02_Партнер 2.0.md",
+      "sourceName": "project_protocol_04.05.2026_S-26-02_Партнер 2.0.md",
+      "type": "project_protocol",
+      "projectCode": "S-26-02",
+      "projectName": "Партнер 2.0",
+      "periodDate": "04.05.2026",
+      "ext": "md",
+      "size": 8604,
+      "mime": "text/markdown",
+      "savedAt": "2026-05-21T02:22:24.051Z",
+      "filePath": "./archive/weekly/project_protocol_04.05.2026_S-26-02_Партнер 2.0.md"
+    },
     {
       "id": "rating_04.05.2026_S-26-02_Партнер 2.0.md",
       "name": "rating_04.05.2026_S-26-02_Партнер 2.0.md",
