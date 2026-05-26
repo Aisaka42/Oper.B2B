@@ -1,6 +1,6 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-26T07:50:37.275Z",
+  "version": "2026-05-26T07:50:38.767Z",
   "archiveDocs": [
     {
       "id": "rating_25.05.2026_S-26-02_Партнер 2.0.md",
