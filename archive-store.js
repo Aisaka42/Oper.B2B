@@ -1,6 +1,6 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-26T07:42:21.799Z",
+  "version": "2026-05-26T07:50:37.275Z",
   "archiveDocs": [
     {
       "id": "rating_25.05.2026_S-26-02_Партнер 2.0.md",
@@ -43,20 +43,6 @@ window.archiveRepoData = {
       "mime": "text/markdown",
       "savedAt": "2026-05-21T02:40:29.517Z",
       "filePath": "./archive/weekly/rating_04.05.2026_S-26-02_Партнер 2.0.md"
-    },
-    {
-      "id": "project_protocol_18.05.2026_S-26-02_Партнер 2.0.md",
-      "name": "project_protocol_18.05.2026_S-26-02_Партнер 2.0.md",
-      "sourceName": "project_protocol_18.05.2026_S-26-02_Партнер 2.0.md",
-      "type": "project_protocol",
-      "projectCode": "S-26-02",
-      "projectName": "Партнер 2.0",
-      "periodDate": "18.05.2026",
-      "ext": "md",
-      "size": 8584,
-      "mime": "text/markdown",
-      "savedAt": "2026-05-21T02:35:43.764Z",
-      "filePath": "./archive/weekly/project_protocol_18.05.2026_S-26-02_Партнер 2.0.md"
     }
   ],
   "snapshotRecords": [
