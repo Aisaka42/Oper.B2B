@@ -1,7 +1,35 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-26T08:37:56.365Z",
+  "version": "2026-05-26T08:52:06.557Z",
   "archiveDocs": [
+    {
+      "id": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
+      "name": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
+      "sourceName": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
+      "type": "rating",
+      "projectCode": "S-09-04",
+      "projectName": "Увеличение выручки B2O",
+      "periodDate": "25.05.2026",
+      "ext": "md",
+      "size": 7466,
+      "mime": "text/markdown",
+      "savedAt": "2026-05-26T08:43:37.078Z",
+      "filePath": "./archive/weekly/rating_25.05.2026_S-09-04_Увеличение выручки B2O.md"
+    },
+    {
+      "id": "project_protocol_25.05.2026_S-09-04_Увеличение выручки B2O.md",
+      "name": "project_protocol_25.05.2026_S-09-04_Увеличение выручки B2O.md",
+      "sourceName": "project_protocol_25.05.2026_S-09-04_Увеличение выручки B2O.md",
+      "type": "project_protocol",
+      "projectCode": "S-09-04",
+      "projectName": "Увеличение выручки B2O",
+      "periodDate": "25.05.2026",
+      "ext": "md",
+      "size": 6856,
+      "mime": "text/markdown",
+      "savedAt": "2026-05-26T08:43:37.071Z",
+      "filePath": "./archive/weekly/project_protocol_25.05.2026_S-09-04_Увеличение выручки B2O.md"
+    },
     {
       "id": "rating_04.05.2026_S-09-04_Увеличение выручки B2O.md",
       "name": "rating_04.05.2026_S-09-04_Увеличение выручки B2O.md",
