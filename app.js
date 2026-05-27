@@ -954,14 +954,15 @@ function parseCharterSnapshot(text, expectedProjectCode, snapshotMonth) {
   const warnings = [];
 
   const headerText = text.split("\n").slice(0, 40).join("\n");
-  const codeMatch = headerText.match(/\*\*Код проекта:\*\*\s*`?([A-ZА-ЯЁ]-\d{2}-\d+)`?/u);
-  const fallbackCodeMatch = headerText.match(/\b([A-ZА-ЯЁ]-\d{2}-\d+)\b/u);
+  const explicitCodeLine = headerText.match(/\*\*Код проекта:\*\*\s*`?([^\n`]+)`?/u);
   const versionMatch = headerText.match(/\*\*Версия документа:\*\*\s*`?([^\n`]+?)`?\s+от\s+`?(\d{2}\.\d{2}\.\d{4})`?/u);
   const titleMatch = text.match(/^#\s+Устав проекта:\s+(.+)$/mu);
   const nameTableMatch = text.match(/\|\s*\*\*Название проекта\*\*\s*\|\s*([^|]+?)\s*\|/u);
   const sectionMatch = text.match(/##\s*6\.\s*План\/факт([\s\S]*?)(?=\n##\s*\d+\.|$)/u);
 
-  const projectCode = codeMatch?.[1]?.trim() || fallbackCodeMatch?.[1]?.trim() || expectedProjectCode || "";
+  const explicitProjectCode = normalizeProjectCode(explicitCodeLine?.[1] || "");
+  const fallbackProjectCode = normalizeProjectCode(headerText);
+  const projectCode = explicitProjectCode || fallbackProjectCode || expectedProjectCode || "";
   const projectName = titleMatch?.[1]?.trim() || nameTableMatch?.[1]?.trim() || "";
   const charterVersion = versionMatch?.[1]?.trim() || "";
   const charterDateRaw = versionMatch?.[2]?.trim() || "";
@@ -971,7 +972,7 @@ function parseCharterSnapshot(text, expectedProjectCode, snapshotMonth) {
 
   if (!projectCode) {
     errors.push("В уставе не найден код проекта в шапке документа.");
-  } else if (!codeMatch && !fallbackCodeMatch && expectedProjectCode) {
+  } else if (!explicitProjectCode && !fallbackProjectCode && expectedProjectCode) {
     warnings.push("Код проекта не найден в шапке: использован код карточки проекта.");
   }
 
@@ -1050,7 +1051,7 @@ function parseFileName(name) {
 
   const base = source.slice(0, -extMatch[0].length);
   const lowered = base.toLowerCase();
-  const typePrefix = ["project_protocol", "rating", "raiting", "checklist"].find((prefix) => lowered.startsWith(`${prefix}_`));
+  const typePrefix = ["project_protocol", "project", "rating", "raiting", "checklist"].find((prefix) => lowered.startsWith(`${prefix}_`));
   if (!typePrefix) return null;
 
   const rest = base.slice(typePrefix.length + 1);
@@ -1058,14 +1059,29 @@ function parseFileName(name) {
   if (!date || !rest.startsWith(date)) return null;
 
   const tail = rest.slice(date.length).replace(/^[_\s-]+/u, "");
-  const codeMatch = tail.match(/^([A-Za-zА-Яа-яЁё])[-_\s]?(\d{2})[-_\s]?(\d+)(?:[_\s-]+)(.+)$/u);
-  if (!codeMatch) return null;
+  let rawCode = "";
+  let rawName = "";
+
+  if (tail.includes("_")) {
+    const separatorIndex = tail.indexOf("_");
+    rawCode = tail.slice(0, separatorIndex);
+    rawName = tail.slice(separatorIndex + 1);
+  } else {
+    const codeMatch = tail.match(/^([A-Za-zА-Яа-яЁё0-9-]+)\s+(.+)$/u);
+    if (!codeMatch) return null;
+    rawCode = codeMatch[1];
+    rawName = codeMatch[2];
+  }
+
+  const projectCode = normalizeProjectCode(rawCode);
+  const projectName = sanitizeWeeklyProjectName(rawName);
+  if (!projectCode || !projectName) return null;
 
   return {
     type: normalizeWeeklyFileType(typePrefix),
     date,
-    projectCode: `${codeMatch[1].toUpperCase()}-${codeMatch[2]}-${codeMatch[3]}`,
-    projectName: sanitizeWeeklyProjectName(codeMatch[4]),
+    projectCode,
+    projectName,
     ext
   };
 }
@@ -1073,6 +1089,7 @@ function parseFileName(name) {
 function normalizeWeeklyFileType(value = "") {
   const normalized = String(value).trim().toLowerCase();
   if (normalized === "raiting") return "rating";
+  if (normalized === "project") return "project_protocol";
   if (normalized.includes("project_protocol") || normalized.includes("protocol")) return "project_protocol";
   if (normalized.includes("rating") || normalized.includes("raiting")) return "rating";
   if (normalized.includes("checklist")) return "checklist";
@@ -1084,12 +1101,34 @@ function extractRuDateToken(value = "") {
   return match ? match[1] : "";
 }
 
+function normalizeProjectCodeToken(value = "") {
+  return cleanInlineMarkdown(value)
+    .toUpperCase()
+    .replace(/[–—−_]/gu, "-")
+    .replace(/\s*-\s*/gu, "-")
+    .trim();
+}
+
+function isProjectCodeCandidate(value = "") {
+  const cleaned = normalizeProjectCodeToken(value);
+  if (!cleaned || !cleaned.includes("-")) return false;
+  if (!/[A-ZА-ЯЁ]/u.test(cleaned)) return false;
+  if (/^\d{2}-\d{2}-\d{4}$/u.test(cleaned) || /^\d{4}-\d{2}-\d{2}$/u.test(cleaned)) return false;
+  return /^[A-ZА-ЯЁ0-9]+(?:-[A-ZА-ЯЁ0-9]+)+$/u.test(cleaned);
+}
+
 function normalizeProjectCode(value = "") {
   const cleaned = cleanInlineMarkdown(value)
     .toUpperCase()
     .replace(/[–—−]/gu, "-");
-  const match = cleaned.match(/\b([A-ZА-ЯЁ])[-_\s]?(\d{2})[-_\s]?(\d+)\b/u);
-  return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+  const legacyMatch = cleaned.match(/\b([A-ZА-ЯЁ])[-_\s]?(\d{2})[-_\s]?(\d+)\b/u);
+  if (legacyMatch) {
+    return `${legacyMatch[1]}-${legacyMatch[2]}-${legacyMatch[3]}`;
+  }
+
+  const candidates = cleaned.match(/\b[A-ZА-ЯЁ0-9]+(?:[-_][A-ZА-ЯЁ0-9]+)+\b/gu) || [];
+  const matched = candidates.find((candidate) => isProjectCodeCandidate(candidate));
+  return matched ? normalizeProjectCodeToken(matched) : "";
 }
 
 function sanitizeWeeklyProjectName(value = "") {
@@ -1112,7 +1151,7 @@ function lookupProjectNameByCode(projectCode = "") {
 
 function typeHintFromFileName(name = "") {
   const lowered = String(name).toLowerCase();
-  if (lowered.includes("project_protocol") || lowered.includes("project protocol") || lowered.includes("протокол")) {
+  if (lowered.startsWith("project_") || lowered.includes("project_protocol") || lowered.includes("project protocol") || lowered.includes("протокол")) {
     return "project_protocol";
   }
   if (lowered.includes("rating") || lowered.includes("raiting") || lowered.includes("рейтинг")) {
@@ -1385,12 +1424,24 @@ function buildProjectId(projectCode = "", fallback = "") {
 }
 
 function splitProjectIdentity(value = "", fallbackCode = "", fallbackName = "") {
-  const cleaned = cleanInlineMarkdown(value);
-  const match = cleaned.match(/\b([A-ZА-ЯЁ]-\d{2}-\d+)\b\s*(.*)$/u);
+  const cleaned = cleanInlineMarkdown(value).replace(/^требует уточнения\s+/iu, "").trim();
+  const projectCode = normalizeProjectCode(cleaned) || normalizeProjectCode(fallbackCode);
+  const nameWithoutCode = projectCode
+    ? cleaned.replace(new RegExp(`\\b${escapeRegex(projectCode)}\\b`, "u"), "").trim()
+    : cleaned;
+
   return {
-    code: match?.[1] || fallbackCode || "",
-    name: cleanInlineMarkdown(match?.[2] || fallbackName || cleaned.replace(/\b[A-ZА-ЯЁ]-\d{2}-\d+\b/u, ""))
+    code: projectCode || fallbackCode || "",
+    name: sanitizeWeeklyProjectName(nameWithoutCode || fallbackName || cleaned)
   };
+}
+
+function extractMetaValue(text, labels = []) {
+  for (const label of labels) {
+    const value = extractBoldMeta(text, label);
+    if (value) return value;
+  }
+  return "";
 }
 
 function extractBoldMeta(text, label) {
@@ -1493,12 +1544,16 @@ function joinSentenceParts(parts = []) {
 
 function parseProtocolDocument(doc, rawText) {
   const text = normalizeWeeklyText(rawText);
-  const identity = splitProjectIdentity(extractBoldMeta(text, "Проект"), doc.projectCode, doc.projectName);
+  const identity = splitProjectIdentity(extractMetaValue(text, ["Проект"]), doc.projectCode, doc.projectName);
   const overview = parseBulletSection(extractNumberedSection(text, 1));
   const deviationSection = extractNumberedSection(text, 4);
   const riskSection = extractNumberedSection(text, 5);
   const escalationSection = extractNumberedSection(text, 8);
   const nextWeekSection = extractNumberedSection(text, 7);
+  const fallbackWeekSummary = uniqueCompact([
+    sectionPlainText(extractNumberedSection(text, 1)),
+    sectionPlainText(extractNumberedSection(text, 4))
+  ])[0] || "";
 
   const deviationRows = tableRowsAsObjects(deviationSection);
   const riskRows = tableRowsAsObjects(riskSection);
@@ -1536,12 +1591,12 @@ function parseProtocolDocument(doc, rawText) {
     type: "project_protocol",
     projectCode: identity.code,
     projectName: identity.name || doc.projectName,
-    periodText: extractBoldMeta(text, "Период"),
-    reportDate: extractBoldMeta(text, "Дата статуса"),
-    customer: extractBoldMeta(text, "Заказчик"),
-    manager: extractBoldMeta(text, "Руководитель проекта"),
+    periodText: extractMetaValue(text, ["Период", "Неделя"]),
+    reportDate: extractMetaValue(text, ["Дата статуса", "Дата отчёта"]),
+    customer: extractMetaValue(text, ["Заказчик"]),
+    manager: extractMetaValue(text, ["Руководитель проекта", "Ответственный"]),
     status: parseStatusCode(overview["Статус проекта"]),
-    weekSummary: overview["Ключевой вывод недели"] || "",
+    weekSummary: overview["Ключевой вывод недели"] || fallbackWeekSummary,
     expectedResult: overview["Ближайший ожидаемый результат"] || "",
     expectedDate: overview["Плановая дата результата"] || "",
     probability: overview["Оценка вероятности достижения в срок"] || "",
@@ -1554,7 +1609,7 @@ function parseProtocolDocument(doc, rawText) {
 
 function parseChecklistDocument(doc, rawText) {
   const text = normalizeWeeklyText(rawText);
-  const identity = splitProjectIdentity(extractBoldMeta(text, "Проект"), doc.projectCode, doc.projectName);
+  const identity = splitProjectIdentity(extractMetaValue(text, ["Проект"]), doc.projectCode, doc.projectName);
   const evaluation = parseBulletSection(extractNumberedSection(text, 1));
   const checklistRows = tableRowsAsObjects(extractNumberedSection(text, 2));
   const summarySection = extractNumberedSection(text, 3);
@@ -1574,8 +1629,8 @@ function parseChecklistDocument(doc, rawText) {
     type: "checklist",
     projectCode: identity.code,
     projectName: identity.name || doc.projectName,
-    periodText: extractBoldMeta(text, "Период оценки"),
-    reportDate: extractBoldMeta(text, "Дата оценки"),
+    periodText: extractMetaValue(text, ["Период оценки", "Период", "Неделя"]),
+    reportDate: extractMetaValue(text, ["Дата оценки", "Дата статуса", "Дата отчёта"]),
     status: parseStatusCode(evaluation["Статус проекта"]),
     progress: parsePercentValue(evaluation["Прогресс к ближайшему ожидаемому результату"]),
     probability: evaluation["Вероятность достижения результата в срок"] || "",
@@ -1593,7 +1648,7 @@ function parseChecklistDocument(doc, rawText) {
 
 function parseRatingDocument(doc, rawText) {
   const text = normalizeWeeklyText(rawText);
-  const identity = splitProjectIdentity(extractBoldMeta(text, "Проект"), doc.projectCode, doc.projectName);
+  const identity = splitProjectIdentity(extractMetaValue(text, ["Проект"]), doc.projectCode, doc.projectName);
   const sectionOne = parseBulletSection(extractNumberedSection(text, 1));
   const scoreMatch = text.match(/\*\*(?:Балл недели|Итоговый балл|Weekly-балл проекта):\*\*\s*([0-9]+(?:[.,][0-9]+)?)/u);
   const progressMatch = text.match(/\*\*(?:Прогресс|Прогресс проекта):\*\*\s*([0-9]+(?:[.,][0-9]+)?)%/u);
@@ -1602,8 +1657,8 @@ function parseRatingDocument(doc, rawText) {
     type: "rating",
     projectCode: identity.code,
     projectName: identity.name || doc.projectName,
-    periodText: extractBoldMeta(text, "Период оценки") || extractBoldMeta(text, "Период"),
-    reportDate: extractBoldMeta(text, "Дата оценки") || extractBoldMeta(text, "Дата статуса"),
+    periodText: extractMetaValue(text, ["Период оценки", "Период", "Неделя"]),
+    reportDate: extractMetaValue(text, ["Дата оценки", "Дата статуса", "Дата отчёта"]),
     status: parseStatusCode(sectionOne["Статус проекта"] || ""),
     score: scoreMatch ? Number(scoreMatch[1].replace(",", ".")) : null,
     progress: progressMatch ? Number(progressMatch[1].replace(",", ".")) : null,
@@ -3117,6 +3172,7 @@ function methodologyMarkup() {
           <ul class="namingExamples">
             <li><span class="codeLine">rating_04.05.2026_S-26-02_Партнер 2.0.md</span></li>
             <li><span class="codeLine">project_protocol_04.05.2026_S-26-02_Партнер 2.0.md</span></li>
+            <li><span class="codeLine">project_25.05.2026_S-26-02_Партнер 2.0.md</span></li>
             <li><span class="codeLine">checklist_04.05.2026_S-26-02_Партнер 2.0.xlsx</span></li>
           </ul>
         </article>
@@ -3146,7 +3202,7 @@ function methodologyMarkup() {
               Выбрать файлы
               <input id="validatorInput" type="file" multiple />
             </label>
-            <div class="validatorHint">Поддерживаемые маски: rating / project_protocol / checklist. Если имя неидеальное, сайт попробует привести его автоматически.</div>
+            <div class="validatorHint">Поддерживаемые маски: rating / project_protocol / project / checklist. Если имя неидеальное, сайт попробует привести его автоматически.</div>
           </div>
           <div class="validatorResult">${validatorRows}</div>
         </div>
