@@ -1,21 +1,7 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-27T17:09:14.601Z",
+  "version": "2026-05-27T17:10:04.641Z",
   "archiveDocs": [
-    {
-      "id": "project_protocol_25.05.2026_S-26-02_Партнер 2.0.md",
-      "name": "project_protocol_25.05.2026_S-26-02_Партнер 2.0.md",
-      "sourceName": "project_25.05.2026_S-26-02_Партнер 2.0.md",
-      "type": "project_protocol",
-      "projectCode": "S-26-02",
-      "projectName": "Партнер 2.0",
-      "periodDate": "25.05.2026",
-      "ext": "md",
-      "size": 6856,
-      "mime": "application/octet-stream",
-      "savedAt": "2026-05-27T17:09:09.303Z",
-      "filePath": "./archive/weekly/project_protocol_25.05.2026_S-26-02_Партнер 2.0.md"
-    },
     {
       "id": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
       "name": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
