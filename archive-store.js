@@ -1,7 +1,21 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-05-27T17:10:04.641Z",
+  "version": "2026-06-03T05:22:16.511Z",
   "archiveDocs": [
+    {
+      "id": "rating_01.06.2026_S-09-04_Увеличение выручки B2O.md",
+      "name": "rating_01.06.2026_S-09-04_Увеличение выручки B2O.md",
+      "sourceName": "raiting_01.06.2026_S-09-04_Увеличение выручки B2O.md",
+      "type": "rating",
+      "projectCode": "S-09-04",
+      "projectName": "Увеличение выручки B2O",
+      "periodDate": "01.06.2026",
+      "ext": "md",
+      "size": 8068,
+      "mime": "text/markdown",
+      "savedAt": "2026-06-03T05:18:32.719Z",
+      "filePath": "./archive/weekly/rating_01.06.2026_S-09-04_Увеличение выручки B2O.md"
+    },
     {
       "id": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
       "name": "rating_25.05.2026_S-09-04_Увеличение выручки B2O.md",
