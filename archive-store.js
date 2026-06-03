@@ -1,6 +1,6 @@
 window.archiveRepoData = {
   "site": "operational-projects-b2b",
-  "version": "2026-06-03T05:22:16.511Z",
+  "version": "2026-06-03T05:22:55.509Z",
   "archiveDocs": [
     {
       "id": "rating_01.06.2026_S-09-04_Увеличение выручки B2O.md",
